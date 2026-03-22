@@ -1,0 +1,5 @@
+data/*.mmdb
+output/
+__pycache__/
+*.pyc
+.env
