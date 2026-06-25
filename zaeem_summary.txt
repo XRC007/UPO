@@ -1,0 +1,4 @@
+OK: https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/http.txt -> Found 290 proxies. Sample: 95.214.9.93:3129
+OK: https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/https.txt -> Found 400 proxies. Sample: 95.214.9.93:3129
+OK: https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/socks4.txt -> Found 110 proxies. Sample: 142.54.236.97:4145
+WARN: https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/socks5.txt -> No ip:port pairs found. Content starts with: ...

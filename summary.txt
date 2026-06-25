@@ -1,0 +1,9 @@
+OK [TEXT]: https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt -> Found 1058 proxies. Sample: 103.247.13.203:8090
+OK [TEXT]: https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt -> Found 745 proxies. Sample: 24.249.199.4:4145
+OK [TEXT]: https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt -> Found 412 proxies. Sample: 72.49.49.11:31034
+OK [TEXT]: https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt -> Found 5018 proxies. Sample: 72.49.49.11:31034
+OK [JSON]: https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.json -> Total: 2926, Sample: 72.49.49.11:31034
+OK [TEXT]: https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/http.txt -> Found 459 proxies. Sample: 4.213.98.253:80
+OK [TEXT]: https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/https.txt -> Found 37 proxies. Sample: 160.187.221.182:8080
+OK [TEXT]: https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/socks4.txt -> Found 87 proxies. Sample: 8.221.141.88:1723
+OK [TEXT]: https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/socks5.txt -> Found 3970 proxies. Sample: 206.123.156.227:6381

@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UPO Dashboard — {% block title %}Home{% endblock %}</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: { extend: {
+    colors: {
+      dark: { 50:'#f8fafc',100:'#e2e8f0',200:'#94a3b8',
+              700:'#1e293b',800:'#0f172a',900:'#020617' }
+    }
+  }}
+}
+</script>
+<style>
+body{background:#0f172a;color:#e2e8f0;font-family:system-ui,sans-serif}
+.sidebar{width:240px;min-height:100vh;background:#020617;border-right:1px solid #1e293b}
+.sidebar a{display:flex;align-items:center;gap:10px;padding:10px 18px;color:#94a3b8;
+  text-decoration:none;font-size:14px;border-left:3px solid transparent;transition:.15s}
+.sidebar a:hover,.sidebar a.active{color:#e2e8f0;background:#0f172a;border-left-color:#3b82f6}
+.card{background:#1e293b;border-radius:12px;padding:20px;border:1px solid #334155}
+.card-title{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:#94a3b8;margin-bottom:6px}
+.card-value{font-size:28px;font-weight:700}
+.badge{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:11px;font-weight:600}
+.badge-green{background:#065f46;color:#6ee7b7}
+.badge-blue{background:#1e3a5f;color:#7dd3fc}
+.badge-yellow{background:#713f12;color:#fde68a}
+.badge-red{background:#7f1d1d;color:#fca5a5}
+.badge-purple{background:#4c1d95;color:#c4b5fd}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;padding:10px 12px;background:#020617;color:#94a3b8;font-weight:600;
+  border-bottom:1px solid #334155;position:sticky;top:0;cursor:pointer}
+.tbl td{padding:8px 12px;border-bottom:1px solid #1e293b}
+.tbl tr:hover td{background:#0f172a}
+.btn{padding:8px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;
+  border:none;transition:.15s}
+.btn-primary{background:#3b82f6;color:#fff}.btn-primary:hover{background:#2563eb}
+.btn-ghost{background:transparent;color:#94a3b8;border:1px solid #334155}
+.btn-ghost:hover{background:#1e293b;color:#e2e8f0}
+select,input[type=text],input[type=number]{background:#020617;color:#e2e8f0;border:1px solid #334155;
+  padding:6px 10px;border-radius:6px;font-size:13px}
+select:focus,input:focus{outline:none;border-color:#3b82f6}
+.delta-up{color:#4ade80}.delta-down{color:#f87171}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#0f172a}
+::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}
+.chart-card{background:#1e293b;border-radius:12px;padding:16px;border:1px solid #334155}
+.tab{padding:8px 16px;cursor:pointer;color:#94a3b8;border-bottom:2px solid transparent;font-size:13px}
+.tab.active{color:#3b82f6;border-bottom-color:#3b82f6}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;display:none;
+  justify-content:center;align-items:center}
+.modal-overlay.show{display:flex}
+.modal{background:#1e293b;border-radius:12px;padding:24px;max-width:700px;width:95%;
+  max-height:85vh;overflow-y:auto;border:1px solid #334155}
+</style>
+</head>
+<body class="flex">
+
+<!-- Sidebar -->
+<nav class="sidebar flex-shrink-0 flex flex-col">
+  <div class="p-5 border-b border-dark-700">
+    <div class="text-xl font-bold text-blue-400">🏆 UPO</div>
+    <div class="text-xs text-dark-200 mt-1">Dashboard v1.0</div>
+  </div>
+  <div class="flex-1 py-4 flex flex-col gap-1">
+    <a href="/" class="{% if page=='dashboard' %}active{% endif %}">📊 Dashboard</a>
+    <a href="/proxies" class="{% if page=='proxies' %}active{% endif %}">📋 Proxies</a>
+    <a href="/analytics" class="{% if page=='analytics' %}active{% endif %}">📈 Analytics</a>
+    <a href="/map" class="{% if page=='map' %}active{% endif %}">🗺️ Map</a>
+    <a href="/export" class="{% if page=='export' %}active{% endif %}">📥 Export</a>
+    <a href="/history" class="{% if page=='history' %}active{% endif %}">📅 History</a>
+    <a href="/recommendations" class="{% if page=='recommendations' %}active{% endif %}">🤖 Recommendations</a>
+    <a href="/settings" class="{% if page=='settings' %}active{% endif %}">⚙️ Settings</a>
+  </div>
+  <div class="p-4 border-t border-dark-700 text-xs text-dark-200">
+    <div id="sb-alive">—</div>
+    <div id="sb-last">—</div>
+  </div>
+</nav>
+
+<!-- Main -->
+<main class="flex-1 overflow-y-auto" style="height:100vh">
+  <div class="p-6">
+    {% block content %}{% endblock %}
+  </div>
+</main>
+
+<script>
+async function fetchJSON(url){const r=await fetch(url);return r.json()}
+document.addEventListener('DOMContentLoaded',async()=>{
+  try{
+    const s=await fetchJSON('/api/summary');
+    document.getElementById('sb-alive').textContent=`✅ ${s.alive||0} alive`;
+    document.getElementById('sb-last').textContent=s.last_run?`🕐 ${s.last_run}`:'No runs yet';
+  }catch(e){}
+});
+const COLORS=['#3b82f6','#8b5cf6','#06b6d4','#10b981','#f59e0b',
+  '#ef4444','#ec4899','#14b8a6','#f97316','#6366f1','#84cc16','#e879f9'];
+function makePie(id,labels,data,title){
+  const ctx=document.getElementById(id);
+  if(!ctx)return;
+  new Chart(ctx,{type:'doughnut',data:{labels,datasets:[{data,
+    backgroundColor:COLORS.slice(0,labels.length),borderWidth:0}]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{position:'right',labels:{color:'#94a3b8',boxWidth:12,font:{size:11}}},
+        title:{display:!!title,text:title,color:'#e2e8f0'}}}});
+}
+function makeBar(id,labels,data,title,horizontal){
+  const ctx=document.getElementById(id);
+  if(!ctx)return;
+  new Chart(ctx,{type:'bar',data:{labels,datasets:[{data,
+    backgroundColor:COLORS.slice(0,labels.length),borderWidth:0,borderRadius:4}]},
+    options:{indexAxis:horizontal?'y':'x',responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},title:{display:!!title,text:title,color:'#e2e8f0'}},
+      scales:{x:{ticks:{color:'#94a3b8'},grid:{color:'#1e293b'}},
+        y:{ticks:{color:'#94a3b8'},grid:{color:'#1e293b'}}}}});
+}
+function makeLine(id,labels,datasets,title){
+  const ctx=document.getElementById(id);
+  if(!ctx)return;
+  new Chart(ctx,{type:'line',data:{labels,datasets},
+    options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      plugins:{legend:{labels:{color:'#94a3b8',boxWidth:12}},
+        title:{display:!!title,text:title,color:'#e2e8f0'}},
+      scales:{x:{ticks:{color:'#94a3b8'},grid:{color:'#1e293b'}},
+        y:{ticks:{color:'#94a3b8'},grid:{color:'#1e293b'}}}}});
+}
+function makeScatter(id,data,title){
+  const ctx=document.getElementById(id);
+  if(!ctx)return;
+  const tMap={residential:'#10b981',datacenter:'#ef4444',mobile:'#f59e0b',unknown:'#94a3b8'};
+  const groups={};
+  data.forEach(d=>{
+    const t=d.type||'unknown';
+    if(!groups[t])groups[t]=[];
+    groups[t].push({x:d.x,y:d.y});
+  });
+  const ds=Object.entries(groups).map(([t,pts])=>({
+    label:t,data:pts,backgroundColor:tMap[t]||'#94a3b8',pointRadius:3,
+  }));
+  new Chart(ctx,{type:'scatter',data:{datasets:ds},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{labels:{color:'#94a3b8'}},
+        title:{display:!!title,text:title,color:'#e2e8f0'}},
+      scales:{x:{title:{display:true,text:'Latency (ms)',color:'#94a3b8'},
+        ticks:{color:'#94a3b8'},grid:{color:'#1e293b'}},
+        y:{title:{display:true,text:'Stealth Score',color:'#94a3b8'},
+        ticks:{color:'#94a3b8'},grid:{color:'#1e293b'}}}}});
+}
+function copyText(t){navigator.clipboard.writeText(t);
+  const el=document.createElement('div');
+  el.textContent='Copied!';
+  el.style.cssText='position:fixed;top:20px;right:20px;background:#065f46;color:#6ee7b7;padding:8px 16px;border-radius:8px;z-index:9999;font-size:13px';
+  document.body.appendChild(el);setTimeout(()=>el.remove(),1500)}
+</script>
+{% block scripts %}{% endblock %}
+</body></html>
