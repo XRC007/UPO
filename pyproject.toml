@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "upo"
+version = "5.0.0"
+description = "UPO — Ultimate Proxy Operator: scrape, verify, fingerprint, score and serve free proxies"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.9",
+    "aiohttp-socks>=0.8",
+    "click>=8.1",
+    "geoip2>=4.8",
+    "PyYAML>=6.0",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+api = ["fastapi", "uvicorn"]
+dotenv = ["python-dotenv"]
+dev = ["pytest", "pytest-asyncio"]
+
+[project.scripts]
+upo = "UPO.cli.app:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["test_upo.py", "test_upo_coverage.py", "test_lifecycle.py", "tests"]
+# tests/archive/ holds dead npo-era specs that cannot import — keep them for
+# reference but never collect (see tests/README.md).
+norecursedirs = ["archive", "*.egg-info", ".*", "build", "dist", "node_modules"]
+asyncio_mode = "auto"

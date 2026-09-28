@@ -1,0 +1,11 @@
+# Isolation config for the A/B benchmark — NEW package run
+output:
+  dir: "bench/new/output"
+crawl4ai:
+  output_file: "bench/new/output/crawled_proxies.json"
+history:
+  db_path: "bench/new/data/proxy_history.db"
+verified_db:
+  db_path: "bench/new/data/verified_proxies.db"
+checked_output:
+  dir: "bench/new/checked"

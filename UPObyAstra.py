@@ -1,14 +1,5 @@
 # ==============================================================================
-#
-# ██╗   ██╗██████╗  ██████╗    ██╗   ██╗███████╗    ███████╗██╗██╗  ██╗
-# ██║   ██║██╔══██╗██╔═══██╗   ██║   ██║██╔════╝    ██╔════╝██║╚██╗██╔╝
-# ██║   ██║██████╔╝██║   ██║   ██║   ██║███████╗    █████╗  ██║ ╚███╔╝
-# ██║   ██║██╔═══╝ ██║   ██║   ╚██╗ ██╔╝╚════██║    ██╔══╝  ██║ ██╔██╗
-# ╚██████╔╝██║     ╚██████╔╝    ╚████╔╝ ███████║    ██║     ██║██╔╝ ██╗
-#  ╚═════╝ ╚═╝      ╚═════╝      ╚═══╝  ╚══════╝    ╚═╝     ╚═╝╚═╝  ╚═╝
-#
-# UPO v5-fix2 — All review fixes applied
-#
+# UPO v5-fix3 — Review patches applied
 # FIX #1: Stealth score recalculated AFTER fraud scoring in categorize phase
 # FIX #2: Reliability threshold > 0.5 for 2-round mode (requires 2/2 pass)
 # FIX #3: Judge rotation across modules (verify/anon/protocol/speed use different judges)
@@ -43,8 +34,12 @@ import geoip2.database
 import yaml
 from rich.console import Console
 from rich.progress import (
-    Progress, BarColumn, TextColumn,
-    TimeRemainingColumn, SpinnerColumn, MofNCompleteColumn,
+    Progress,
+    BarColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    SpinnerColumn,
+    MofNCompleteColumn,
 )
 from rich.table import Table
 from rich.panel import Panel
@@ -52,9 +47,81 @@ from rich.panel import Panel
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-# Ensure the working directory is the script's directory
-# This allows the VS Code Run button to resolve relative paths correctly.
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = Path(__file__).resolve().parent
+
+
+def resolve_path(value) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else BASE_DIR / path
+
+
+def deep_merge(base: dict, override: dict) -> dict:
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if (
+            key in result
+            and isinstance(result[key], dict)
+            and isinstance(value, dict)
+        ):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def validate_config(config: dict):
+    general = config["general"]
+    api = config["api"]
+    if general["concurrency"] < 1:
+        raise ValueError("general.concurrency must be at least 1")
+    if general.get("timeout_connect", 1) < 1:
+        raise ValueError("general.timeout_connect must be at least 1")
+    if general.get("timeout_total", 1) < 1:
+        raise ValueError("general.timeout_total must be at least 1")
+    rounds = general.get("verification_rounds", 1)
+    if not 1 <= rounds <= 5:
+        raise ValueError(
+            "general.verification_rounds must be between 1 and 5"
+        )
+    if not 1 <= api["port"] <= 65535:
+        raise ValueError("api.port must be between 1 and 65535")
+
+
+RETRYABLE_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+
+
+async def run_bounded(items, worker_func, concurrency: int):
+    if not items:
+        return []
+    queue = asyncio.Queue()
+    for item in items:
+        await queue.put(item)
+    results = []
+
+    async def worker():
+        while True:
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                result = await worker_func(item)
+                results.append(result)
+            except Exception as exc:
+                results.append(exc)
+            finally:
+                queue.task_done()
+
+    worker_count = min(concurrency, max(1, len(items)))
+    tasks = [
+        asyncio.create_task(worker())
+        for _ in range(worker_count)
+    ]
+    await queue.join()
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    return results
 
 try:
     from dotenv import load_dotenv
@@ -63,23 +130,50 @@ except ImportError:
     pass
 
 CRAWL4AI_INSTALL_PATH = r"D:\3dAI\Data Analyze"
-console = Console()
+# Force UTF-8 output on Windows to avoid cp1252 UnicodeEncodeError with
+# box-drawing characters / emoji used in the Rich banner and Click help text.
 
-# ==============================================================================
+if sys.platform == "win32":
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+console = Console()
+# ============================================================================
 # SECTION 0: CONFIG & SOURCES
 # ==============================================================================
-
 DEFAULT_CONFIG = {
     "general": {
-        "concurrency": 150,
-        "timeout_connect": 12,
-        "timeout_total": 25,
+        "concurrency": 100,
+        "timeout_connect": 8,
+        "timeout_total": 15,
         "user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/131.0.0.0 Safari/537.36"
         ),
         "verification_rounds": 1,
+        "per_request_delay": 0,
+    },
+    "concurrency": {
+        "collection": 50,
+        "tcp": 200,
+        "verification": 100,
+        "anonymity": 50,
+        "protocol": 30,
+        "speed": 20,
+        "fingerprint": 30,
+        "dns": 30,
+        "ban": 20,
+        "fraud": 10,
+    },
+    "limits": {
+        "max_anonymity_checks": 2000,
+        "max_protocol_checks": 500,
+        "max_speed_checks": 200,
+        "max_fingerprint_checks": 300,
+        "max_dns_checks": 500,
+        "max_ban_checks": 100,
     },
     "judges": {
         "urls": [
@@ -117,7 +211,7 @@ DEFAULT_CONFIG = {
         "blocked_countries": [],
         "exclude_datacenters": False,
         "min_anonymity": None,
-        "max_per_subnet": 100,   # ← cap proxies per /24 subnet (0 = disabled)
+        "max_per_subnet": 100,
     },
     "output": {
         "dir": "output",
@@ -133,16 +227,22 @@ DEFAULT_CONFIG = {
         "generate_clean_list": True,
     },
     "crawl4ai": {
-        "enabled": True,
+        "enabled": False,
         "output_file": "output/crawled_proxies.json",
     },
     "ban_check": {
         "enabled": True,
         "sites": [
-            {"name": "google", "url": "https://www.google.com/search?q=test",
-             "success_pattern": "google"},
-            {"name": "bing", "url": "https://www.bing.com/search?q=test",
-             "success_pattern": "bing"},
+            {
+                "name": "google",
+                "url": "https://www.google.com/search?q=test",
+                "success_pattern": "google",
+            },
+            {
+                "name": "bing",
+                "url": "https://www.bing.com/search?q=test",
+                "success_pattern": "bing",
+            },
         ],
     },
     "speed_test": {
@@ -160,200 +260,145 @@ DEFAULT_CONFIG = {
             "ipqs": os.getenv("API_IPQS", ""),
         },
     },
-    "dns_leak": {"enabled": True},
-    "protocol_detection": {"enabled": True},
+    "dns_leak": {"enabled": False},
+    "source_cache": {
+        "enabled": True,
+        "dir": "output/source_cache",
+        "ttl_minutes": 30,
+    },
+    "protocol_detection": {
+        "enabled": True,
+        "deep_scan": False,
+        "max_proxies": 500,
+    },
     "stealth_score": {"enabled": True},
     "history": {"enabled": True, "db_path": "data/proxy_history.db"},
     "verified_db": {"enabled": True, "db_path": "data/verified_proxies.db"},
     "checked_output": {"enabled": True, "dir": "checked"},
-    "api": {"enabled": False, "host": "127.0.0.1", "port": 8000},
+    "api": {
+        "enabled": False,
+        "host": "127.0.0.1",
+        "port": 8000,
+        "max_limit": 1000,
+        "api_key": os.getenv("UPO_API_KEY", ""),
+    },
 }
 
-GITHUB_HTTP_SOURCES = [
-    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
-    "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt",
-    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
-    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt",
-    "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt",
-    "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt",
-    "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt",
-    "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt",
-    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
-    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt",
-    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
-    "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt",
-    "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt",
-    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
-    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/https/data.txt",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt",
-    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt",
-    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt",
-    "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt",
-    "https://raw.githubusercontent.com/hendrikbgr/Free-Proxy-Repo/master/proxy_list.txt",
-    "https://raw.githubusercontent.com/almroot/proxylist/master/list.txt",
-    "https://raw.githubusercontent.com/aslisk/proxyhttps/main/https.txt",
-    "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt",
-    "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/https_proxies.txt",
-    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/http.txt",
-    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/https.txt",
-    "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt",
-    "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies_anonymous/http.txt",
-    "https://raw.githubusercontent.com/yuceltoluyag/GoodProxy/main/raw.txt",
-    "https://raw.githubusercontent.com/Tsprnay/Proxy-lists/master/proxies/http.txt",
-    "https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/http.txt",
-    "https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/https.txt",
-    "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt",
-    "https://raw.githubusercontent.com/im-razvan/proxy_list/main/http.txt",
-    "https://raw.githubusercontent.com/andigwandi/free-proxy/main/proxy_list.txt",
-    "https://raw.githubusercontent.com/casals-ar/proxy-list/main/http",
-]
+GITHUB_HTTP_SOURCES = [ "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt", "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt", "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt", "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt", "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt", "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt", "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt", "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/https.txt", "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt", "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt", "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt", "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt", "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/https/data.txt", "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt", "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-https.txt", "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt", "https://raw.githubusercontent.com/hendrikbgr/Free-Proxy-Repo/master/proxy_list.txt", "https://raw.githubusercontent.com/almroot/proxylist/master/list.txt", "https://raw.githubusercontent.com/aslisk/proxyhttps/main/https.txt", "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt", "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/https_proxies.txt", "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/http.txt", "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/https.txt", "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt", "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies_anonymous/http.txt", "https://raw.githubusercontent.com/yuceltoluyag/GoodProxy/main/raw.txt", "https://raw.githubusercontent.com/Tsprnay/Proxy-lists/master/proxies/http.txt", "https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/http.txt", "https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/https.txt", "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt", "https://raw.githubusercontent.com/im-razvan/proxy_list/main/http.txt", "https://raw.githubusercontent.com/andigwandi/free-proxy/main/proxy_list.txt", "https://raw.githubusercontent.com/casals-ar/proxy-list/main/http", ]
 
-GITHUB_SOCKS4_SOURCES = [
-    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks4/data.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
-    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt",
-    "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/socks4_proxies.txt",
-    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt",
-    "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks4.txt",
-    "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks4.txt",
-    "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks4.txt",
-    "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks4.txt",
-    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks4.txt",
-    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks4.txt",
-    "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks4.txt",
-    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks4.txt",
-    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks4.txt",
-    "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/socks4_proxies.txt",
-    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/socks4.txt",
-    "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks4.txt",
-    "https://raw.githubusercontent.com/Tsprnay/Proxy-lists/master/proxies/socks4.txt",
-    "https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/socks4.txt",
-    "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/socks4.txt",
-    "https://raw.githubusercontent.com/casals-ar/proxy-list/main/socks4",
-]
+GITHUB_SOCKS4_SOURCES = [ "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks4/data.txt", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt", "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/socks4_proxies.txt", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks4.txt", "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/socks4.txt", "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks4.txt", "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks4.txt", "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks4.txt", "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks4.txt", "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks4.txt", "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks4.txt", "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt", "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks4.txt", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks4.txt", "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/socks4_proxies.txt", "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/refs/heads/master/socks4.txt", "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks4.txt", "https://raw.githubusercontent.com/Tsprnay/Proxy-lists/master/proxies/socks4.txt", "https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/socks4.txt", "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/socks4.txt", "https://raw.githubusercontent.com/casals-ar/proxy-list/main/socks4", ]
 
-GITHUB_SOCKS5_SOURCES = [
-    "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt",
-    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
-    "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/socks5_proxies.txt",
-    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt",
-    "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt",
-    "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks5.txt",
-    "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt",
-    "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks5.txt",
-    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks5.txt",
-    "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks5.txt",
-    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt",
-    "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt",
-    "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt",
-    "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/socks5_proxies.txt",
-    "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks5.txt",
-    "https://raw.githubusercontent.com/Tsprnay/Proxy-lists/master/proxies/socks5.txt",
-    "https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/socks5.txt",
-    "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/socks5.txt",
-    "https://raw.githubusercontent.com/im-razvan/proxy_list/main/socks5.txt",
-    "https://raw.githubusercontent.com/casals-ar/proxy-list/main/socks5",
-]
+GITHUB_SOCKS5_SOURCES = [ "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt", "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt", "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/socks5_proxies.txt", "https://raw.githubusercontent.com/mmpx12/proxy-list/master/socks5.txt", "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt", "https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks5.txt", "https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt", "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks5.txt", "https://raw.githubusercontent.com/zloi-user/hideip.me/main/socks5.txt", "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/socks5.txt", "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt", "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt", "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt", "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt", "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/socks5_proxies.txt", "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/socks5.txt", "https://raw.githubusercontent.com/Tsprnay/Proxy-lists/master/proxies/socks5.txt", "https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/socks5.txt", "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/socks5.txt", "https://raw.githubusercontent.com/im-razvan/proxy_list/main/socks5.txt", "https://raw.githubusercontent.com/casals-ar/proxy-list/main/socks5", ]
 
 API_SOURCES = [
     # (Legacy untargeted proxyscrape calls removed to prevent duplicate 2000-cap limiting)
     {"url": "https://api.openproxylist.xyz/http.txt", "protocol": "http"},
     {"url": "https://api.openproxylist.xyz/socks4.txt", "protocol": "socks4"},
     {"url": "https://api.openproxylist.xyz/socks5.txt", "protocol": "socks5"},
-    # ─── 🆕 Bypass Geonode Limits (Geographically Targeted) ──────────
+    # Bypass Geonode Limits (Geographically Targeted)
     *[
         {
-            "url": f"https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&country={cc}", 
-            "protocol": "mixed", "format": "json"
+            "url": (
+                "https://proxylist.geonode.com/api/proxy-list"
+                f"?limit=500&page=1&sort_by=lastChecked&sort_type=desc&country={cc}"
+            ),
+            "protocol": "mixed",
+            "format": "json",
         }
-        for cc in ["US", "GB", "DE", "FR", "NL", "CA", "KR", "JP", "SG", "AU", "TR", "BR", "RU", "IN", "ID", "MY", "TW", "HK", "VN", "PL"]
+        for cc in [
+            "US", "GB", "DE", "FR", "NL", "CA", "KR", "JP", "SG", "AU",
+            "TR", "BR", "RU", "IN", "ID", "MY", "TW", "HK", "VN", "PL",
+        ]
     ],
 
-    # ─── 🆕 Proxifly (CDN - Updated every 5 min, 79+ countries) ─────────
-    {"url": "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt", "protocol": "http"},
-    {"url": "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt", "protocol": "socks4"},
-    {"url": "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt", "protocol": "socks5"},
-    {"url": "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt", "protocol": "mixed"},
-    {"url": "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.json", "protocol": "mixed", "format": "json"},
 
-    # ─── 🆕 iplocate ─────────
-    {"url": "https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/http.txt", "protocol": "http"},
-    {"url": "https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/https.txt", "protocol": "https"},
-    {"url": "https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/socks4.txt", "protocol": "socks4"},
-    {"url": "https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/socks5.txt", "protocol": "socks5"},
+# ─── 🆕 Proxifly (CDN - Updated every 5 min, 79+ countries) ─────────
+{"url": "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt", "protocol": "http"},
+{"url": "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt", "protocol": "socks4"},
+{"url": "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt", "protocol": "socks5"},
+{"url": "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt", "protocol": "mixed"},
+{"url": "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.json", "protocol": "mixed", "format": "json"},
 
-    # ─── 🆕 SpyS.one API (Raw list, huge DB) ─────────────────────────────
-    {"url": "https://spys.me/proxy.txt", "protocol": "http"},
-    {"url": "https://spys.me/socks.txt", "protocol": "socks5"},
+# ─── 🆕 iplocate ─────────
+{"url": "https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/http.txt", "protocol": "http"},
+{"url": "https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/https.txt", "protocol": "https"},
+{"url": "https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/socks4.txt", "protocol": "socks4"},
+{"url": "https://raw.githubusercontent.com/iplocate/free-proxy-list/refs/heads/main/protocols/socks5.txt", "protocol": "socks5"},
 
-    # ─── 🆕 redscrape ─────────────────────────────
-    {"url": "https://free.redscrape.com/api/proxies?type=http&format=txt", "protocol": "http"},
-    {"url": "https://free.redscrape.com/api/proxies?type=socks4&format=txt", "protocol": "socks4"},
-    {"url": "https://free.redscrape.com/api/proxies?type=socks5&format=txt", "protocol": "socks5"},
+# ─── 🆕 SpyS.one API (Raw list, huge DB) ─────────────────────────────
+{"url": "https://spys.me/proxy.txt", "protocol": "http"},
+{"url": "https://spys.me/socks.txt", "protocol": "socks5"},
 
-    # ─── 🆕 Bypass ProxyScrape 2000 Hard Limit (Geographically Targeted) ──────────
-    # Requesting "all" triggers a hard 2000-proxy limit, missing huge pockets.
-    # By querying target countries individually, we can extract 10,000+ proxies!
-    *[
-        {
-            "url": f"https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_type={pt}&timeout=10000&country={cc}", 
-            "protocol": pt
-        }
-        for pt in ["http", "socks4", "socks5"]
-        for cc in ["US", "GB", "DE", "FR", "NL", "CA", "KR", "JP", "SG", "AU", "TR", "BR", "RU", "IN", "ID", "MY", "TW", "HK", "VN", "PL"]
-    ],
+# ─── 🆕 redscrape ─────────────────────────────
+{"url": "https://free.redscrape.com/api/proxies?type=http&format=txt", "protocol": "http"},
+{"url": "https://free.redscrape.com/api/proxies?type=socks4&format=txt", "protocol": "socks4"},
+{"url": "https://free.redscrape.com/api/proxies?type=socks5&format=txt", "protocol": "socks5"},
 
-    # ─── 🆕 proxyspace.pro ────────────────────────────────────────────────
-    {"url": "https://proxyspace.pro/http.txt",   "protocol": "http"},
-    {"url": "https://proxyspace.pro/socks4.txt", "protocol": "socks4"},
-    {"url": "https://proxyspace.pro/socks5.txt", "protocol": "socks5"},
+# ─── 🆕 Bypass ProxyScrape 2000 Hard Limit (Geographically Targeted) ──────────
+# Requesting "all" triggers a hard 2000-proxy limit, missing huge pockets.
+# By querying target countries individually, we can extract 10,000+ proxies!
+*[
+    {
+        "url": f"https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_type={pt}&timeout=10000&country={cc}", 
+        "protocol": pt
+    }
+    for pt in ["http", "socks4", "socks5"]
+    for cc in ["US", "GB", "DE", "FR", "NL", "CA", "KR", "JP", "SG", "AU", "TR", "BR", "RU", "IN", "ID", "MY", "TW", "HK", "VN", "PL"]
+],
+
+# ─── 🆕 proxyspace.pro ────────────────────────────────────────────────
+{"url": "https://proxyspace.pro/http.txt",   "protocol": "http"},
+{"url": "https://proxyspace.pro/socks4.txt", "protocol": "socks4"},
+{"url": "https://proxyspace.pro/socks5.txt", "protocol": "socks5"},
+
 ]
 
 DATACENTER_ASNS: Set[int] = {
-    16509, 14618, 15169, 396982, 36492, 8075, 8068, 8069,
-    45102, 37963, 45096, 14061, 63949, 63018, 20473, 20454,
-    24940, 16276, 35540, 31898, 7160, 19994, 46606, 53831,
-    32244, 36351, 3223, 30633, 51167, 60781, 197540, 55286,
-    54825, 12876, 9009, 202422, 60068, 131199, 51396, 41436,
+    16509, 14618, 15169, 396982, 36492, 8075, 8068, 8069, 45102, 37963,
+    45096, 14061, 63949, 63018, 20473, 20454, 24940, 16276, 35540, 31898,
+    7160, 19994, 46606, 53831, 32244, 36351, 3223, 30633, 51167, 60781,
+    197540, 55286, 54825, 12876, 9009, 202422, 60068, 131199, 51396, 41436,
     62240, 42831, 398101, 26496, 174, 3356, 6939,
 }
 RESIDENTIAL_ASNS: Set[int] = {
-    7922, 20115, 22773, 7018, 701, 3320, 12322, 3215,
-    5089, 2856, 4134, 4837, 9299, 17676, 4755, 9121,
-    6830, 6805, 3269, 12479, 8151, 10481, 11351, 4788,
-    45609, 55410, 24560, 9829, 18881, 28573, 27699, 8167,
+    7922, 20115, 22773, 7018, 701, 3320, 12322, 3215, 5089, 2856, 4134,
+    4837, 9299, 17676, 4755, 9121, 6830, 6805, 3269, 12479, 8151, 10481,
+    11351, 4788, 45609, 55410, 24560, 9829, 18881, 28573, 27699, 8167,
 }
 MOBILE_ASNS: Set[int] = {
-    21928, 7065, 6167, 10507, 23089, 12430, 6739, 25135,
-    15480, 8412, 12529, 20801, 21334, 45271, 55836, 17421,
-    23969, 132199, 10139, 4818, 9808, 56040, 56041, 56042,
-    36935, 37457, 33771, 15802, 39386, 26615, 27747,
+    21928, 7065, 6167, 10507, 23089, 12430, 6739, 25135, 15480, 8412,
+    12529, 20801, 21334, 45271, 55836, 17421, 23969, 132199, 10139, 4818,
+    9808, 56040, 56041, 56042, 36935, 37457, 33771, 15802, 39386, 26615,
+    27747,
 }
 CDN_ASNS: Set[int] = {
     13335, 209242, 20940, 16625, 54113, 15133, 22822, 2906,
 }
 CLOUDFLARE_IP_RANGES = [
-    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22",
-    "103.31.4.0/22", "141.101.64.0/18", "108.162.192.0/18",
-    "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22",
-    "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
-    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+    "173.245.48.0/20",
+    "103.21.244.0/22",
+    "103.22.200.0/22",
+    "103.31.4.0/22",
+    "141.101.64.0/18",
+    "108.162.192.0/18",
+    "190.93.240.0/20",
+    "188.114.96.0/20",
+    "197.234.240.0/22",
+    "198.41.128.0/17",
+    "162.158.0.0/15",
+    "104.16.0.0/13",
+    "104.24.0.0/14",
+    "172.64.0.0/13",
+    "131.0.72.0/22",
 ]
 PROXY_REGEX = re.compile(
     r"(?:(?P<protocol>https?|socks[45])://)?"
-    r"(?:[\w.-]+:[\w.-]+@)?"
+    r"(?:(?P<username>[\w.-]+):(?P<password>[\w.-]+)@)?"
     r"(?P<ip>(?:\d{1,3}\.){3}\d{1,3})"
     r":(?P<port>\d{2,5})"
 )
 
-
-# ==============================================================================
+# ============================================================================
 # SECTION 1: DATA MODELS
 # ==============================================================================
 
@@ -379,7 +424,7 @@ class ProxyType(str, Enum):
     MOBILE = "mobile"
     UNKNOWN = "unknown"
 
-@dataclass
+@dataclass(slots=True)
 class Proxy:
     ip: str
     port: int
@@ -403,11 +448,18 @@ class Proxy:
     dns_leak: Optional[bool] = None
     tcp_fingerprint: Optional[str] = None
     google_ban: Optional[bool] = None
+    # fraud_score: provider-specific raw score (e.g. GetIPIntel 0-1 probability)
     fraud_score: Optional[float] = None
+    # composite_score: internal 0-100 accumulator from all providers
     composite_score: Optional[int] = None
+    # fraud_risk_score: canonical public field — always 0-100, synced from composite_score
+    fraud_risk_score: Optional[float] = None
     is_vpn: Optional[bool] = None
     is_tor: Optional[bool] = None
     is_hosting: Optional[bool] = None
+    # Credential fields — populated when parsed from authenticated proxy URLs
+    username: Optional[str] = None
+    password: Optional[str] = None
     first_seen: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -417,6 +469,7 @@ class Proxy:
     fail_count: int = 0
     reliability: float = 0.0
     avg_latency_ms: Optional[float] = None
+    tcp_reachable: Optional[bool] = None
     uptime_history: List[bool] = field(default_factory=list)
 
     def __post_init__(self):
@@ -431,6 +484,8 @@ class Proxy:
 
     @property
     def url(self) -> str:
+        if self.username and self.password:
+            return f"{self.protocol.value}://{self.username}:{self.password}@{self.ip}:{self.port}"
         return f"{self.protocol.value}://{self.ip}:{self.port}"
 
     @property
@@ -446,8 +501,7 @@ class Proxy:
         d["proxy_type"] = self.proxy_type.value if self.proxy_type else None
         return d
 
-
-# ==============================================================================
+# ============================================================================
 # SECTION 2: IP FILTER
 # ==============================================================================
 
@@ -455,10 +509,14 @@ class IPFilter:
     def __init__(self):
         self.cf_networks = [ip_network(c) for c in CLOUDFLARE_IP_RANGES]
         self.private_networks = [
-            ip_network("10.0.0.0/8"), ip_network("172.16.0.0/12"),
-            ip_network("192.168.0.0/16"), ip_network("127.0.0.0/8"),
-            ip_network("0.0.0.0/8"), ip_network("169.254.0.0/16"),
-            ip_network("224.0.0.0/4"), ip_network("240.0.0.0/4"),
+            ip_network("10.0.0.0/8"),
+            ip_network("172.16.0.0/12"),
+            ip_network("192.168.0.0/16"),
+            ip_network("127.0.0.0/8"),
+            ip_network("0.0.0.0/8"),
+            ip_network("169.254.0.0/16"),
+            ip_network("224.0.0.0/4"),
+            ip_network("240.0.0.0/4"),
             ip_network("100.64.0.0/10"),
         ]
 
@@ -498,7 +556,7 @@ class IPFilter:
                 continue
             allowed = config["filter"].get("allowed_countries", [])
             blocked = config["filter"].get("blocked_countries", [])
-            if allowed and p.country_code and p.country_code not in allowed:
+            if allowed and p.country_code not in allowed:
                 stats["country_filtered"] += 1
                 continue
             if blocked and p.country_code and p.country_code in blocked:
@@ -507,8 +565,7 @@ class IPFilter:
             valid[addr] = p
         return valid, dict(stats)
 
-
-# ==============================================================================
+# ============================================================================
 # SECTION 3: HISTORY DB
 # ==============================================================================
 
@@ -527,64 +584,83 @@ class ProxyHistory:
             id INTEGER PRIMARY KEY AUTOINCREMENT, proxy_id TEXT,
             checked_at TEXT, alive INT, latency INT, anonymity TEXT)""")
         c.execute("""CREATE TABLE IF NOT EXISTS api_cache (
-            ip TEXT PRIMARY KEY, checked_at TEXT, composite_score INT,
-            raw_data TEXT)""")
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_checks_pid ON checks(proxy_id)"
-        )
+            ip TEXT PRIMARY KEY, checked_at TEXT, composite_score INT, raw_data TEXT)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_checks_pid ON checks(proxy_id)")
         conn.commit()
         conn.close()
 
     def _conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path, timeout=10)
+        conn = sqlite3.connect(self.db_path, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        return conn
 
     def update(self, proxy: "Proxy"):
         conn = self._conn()
         try:
-            c = conn.cursor()
-            now = datetime.now(timezone.utc).isoformat()
-            c.execute("SELECT id FROM proxies WHERE id=?", (proxy.id,))
-            if c.fetchone():
-                c.execute(
-                    """UPDATE proxies SET last_seen=?,
-                    last_alive=CASE WHEN ?=1 THEN ? ELSE last_alive END,
-                    total_checks=total_checks+1,
-                    successful_checks=successful_checks+?,
-                    avg_latency=CASE
-                        WHEN ? IS NOT NULL AND avg_latency IS NOT NULL
-                        THEN (avg_latency+?)/2
-                        WHEN ? IS NOT NULL THEN ?
-                        ELSE avg_latency END,
-                    country=COALESCE(?,country), asn=COALESCE(?,asn),
-                    isp=COALESCE(?,isp), proxy_type=COALESCE(?,proxy_type)
-                    WHERE id=?""",
-                    (now, 1 if proxy.alive else 0, now,
-                     1 if proxy.alive else 0,
-                     proxy.latency_ms, proxy.latency_ms,
-                     proxy.latency_ms, proxy.latency_ms,
-                     proxy.country_code, proxy.asn, proxy.isp,
-                     proxy.proxy_type.value if proxy.proxy_type else None,
-                     proxy.id),
-                )
-            else:
-                c.execute(
-                    "INSERT INTO proxies VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (proxy.id, proxy.ip, proxy.port, proxy.protocol.value,
-                     proxy.first_seen, now, now if proxy.alive else None,
-                     1, 1 if proxy.alive else 0, proxy.latency_ms,
-                     proxy.country_code, proxy.asn, proxy.isp,
-                     proxy.proxy_type.value if proxy.proxy_type else None),
-                )
-            c.execute(
-                "INSERT INTO checks (proxy_id,checked_at,alive,latency,anonymity) VALUES (?,?,?,?,?)",
-                (proxy.id, now, 1 if proxy.alive else 0, proxy.latency_ms,
-                 proxy.anonymity.value if proxy.anonymity else None),
-            )
+            self._update_one(conn, proxy)
             conn.commit()
         except sqlite3.Error as e:
             console.print(f"[dim red]DB write error: {e}[/dim red]")
         finally:
             conn.close()
+
+    def update_many(self, proxies: List["Proxy"]):
+        if not proxies:
+            return
+        conn = self._conn()
+        try:
+            with conn:
+                for proxy in proxies:
+                    self._update_one(conn, proxy)
+        except sqlite3.Error as exc:
+            console.print(
+                f"[dim red]DB batch write error: {exc}[/dim red]"
+            )
+        finally:
+            conn.close()
+
+    def _update_one(self, conn: sqlite3.Connection, proxy: "Proxy"):
+        c = conn.cursor()
+        now = datetime.now(timezone.utc).isoformat()
+        c.execute("SELECT id FROM proxies WHERE id=?", (proxy.id,))
+        if c.fetchone():
+            c.execute(
+                """UPDATE proxies SET last_seen=?,
+                last_alive=CASE WHEN ?=1 THEN ? ELSE last_alive END,
+                total_checks=total_checks+1,
+                successful_checks=successful_checks+?,
+                avg_latency=CASE
+                    WHEN ? IS NOT NULL AND avg_latency IS NOT NULL
+                    THEN (avg_latency+?)/2
+                    WHEN ? IS NOT NULL THEN ?
+                    ELSE avg_latency END,
+                country=COALESCE(?,country), asn=COALESCE(?,asn),
+                isp=COALESCE(?,isp), proxy_type=COALESCE(?,proxy_type)
+                WHERE id=?""",
+                (now, 1 if proxy.alive else 0, now,
+                 1 if proxy.alive else 0,
+                 proxy.latency_ms, proxy.latency_ms,
+                 proxy.latency_ms, proxy.latency_ms,
+                 proxy.country_code, proxy.asn, proxy.isp,
+                 proxy.proxy_type.value if proxy.proxy_type else None,
+                 proxy.id),
+            )
+        else:
+            c.execute(
+                "INSERT INTO proxies VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (proxy.id, proxy.ip, proxy.port, proxy.protocol.value,
+                 proxy.first_seen, now, now if proxy.alive else None,
+                 1, 1 if proxy.alive else 0, proxy.latency_ms,
+                 proxy.country_code, proxy.asn, proxy.isp,
+                 proxy.proxy_type.value if proxy.proxy_type else None),
+            )
+        c.execute(
+            "INSERT INTO checks (proxy_id,checked_at,alive,latency,anonymity) VALUES (?,?,?,?,?)",
+            (proxy.id, now, 1 if proxy.alive else 0, proxy.latency_ms,
+             proxy.anonymity.value if proxy.anonymity else None),
+        )
 
     def get_cached_score(self, ip: str) -> Optional[int]:
         conn = self._conn()
@@ -634,8 +710,7 @@ class ProxyHistory:
         finally:
             conn.close()
 
-
-# ==============================================================================
+# ============================================================================
 # SECTION 3B: VERIFIED PROXY DB
 # ==============================================================================
 
@@ -706,8 +781,7 @@ class VerifiedProxyDB:
         finally:
             conn.close()
 
-
-# ==============================================================================
+# ============================================================================
 # SECTION 4: RATE LIMITER
 # ==============================================================================
 
@@ -729,8 +803,7 @@ class RateLimiter:
                 await asyncio.sleep(self.interval - elapsed)
             self.last_call = time.monotonic()
 
-
-# ==============================================================================
+# ============================================================================
 # SECTION 5: CORE ENGINE
 # ==============================================================================
 
@@ -752,14 +825,60 @@ class UPOEngine:
         self.iphub_limiter = RateLimiter(100)
         self.ipinfo_limiter = RateLimiter(600)
         self.stats: Dict[str, Any] = {
-            "collected_raw": 0, "filtered": 0,
-            "tcp_prefilter_removed": 0,   # ← NEW: tracks TCP-dead count
-            "verified_total": 0, "verified_alive": 0,
+            "collected_raw": 0,
+            "filtered": 0,
+            "tcp_prefilter_removed": 0,
+            "verified_total": 0,
+            "verified_alive": 0,
             "api_calls": {
-                "ipinfo": 0, "iphub": 0, "getipintel": 0,
-                "ipqs": 0, "cache_hits": 0,
+                "ipinfo": 0,
+                "iphub": 0,
+                "getipintel": 0,
+                "ipqs": 0,
+                "cache_hits": 0,
             },
         }
+        self.failed_proxies: Dict[str, Proxy] = {}
+        self._http_session: Optional[aiohttp.ClientSession] = None
+        self._judge_index = 0
+        self._judge_lock: Optional[asyncio.Lock] = None  # created on first async use
+
+    def add_proxy(self, proxy: Proxy):
+        if proxy.id not in self.proxies:
+            self.proxies[proxy.id] = proxy
+
+    def alive_proxies(self) -> List[Proxy]:
+        return [p for p in self.proxies.values() if p.alive]
+
+    def select_candidates(self, limit_key: str) -> List[Proxy]:
+        alive = [p for p in self.proxies.values() if p.alive]
+        limit = self.config.get("limits", {}).get(limit_key)
+        proto_limit = None
+        if limit_key == "max_protocol_checks":
+            proto_limit = self.config.get("protocol_detection", {}).get("max_proxies")
+            if proto_limit:
+                limit = min(limit or proto_limit, proto_limit)
+        alive.sort(
+            key=lambda p: (
+                p.latency_ms is None,
+                p.latency_ms or 999999,
+            )
+        )
+        return alive[:limit] if limit else alive
+
+    def _phase_concurrency(self, key: str, default: int) -> int:
+        return int(self.config.get("concurrency", {}).get(key, default))
+
+    async def _next_judge(self) -> str:
+        if not self.judges:
+            return "http://api.ipify.org"
+        # Lazily create lock inside async context (event loop is guaranteed here)
+        if self._judge_lock is None:
+            self._judge_lock = asyncio.Lock()
+        async with self._judge_lock:
+            judge = self.judges[self._judge_index % len(self.judges)][0]
+            self._judge_index += 1
+        return judge
 
     # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -809,17 +928,17 @@ class UPOEngine:
         if self.config["geoip"]["enabled"]:
             try:
                 self.geoip_city = geoip2.database.Reader(
-                    self.config["geoip"]["city_db"]
+                    str(resolve_path(self.config["geoip"]["city_db"]))
                 )
                 self.geoip_asn = geoip2.database.Reader(
-                    self.config["geoip"]["asn_db"]
+                    str(resolve_path(self.config["geoip"]["asn_db"]))
                 )
                 console.print("[green]✓[/] GeoIP databases loaded.")
             except FileNotFoundError:
                 console.print("[yellow]⚠[/] GeoIP databases not found.")
                 self.config["geoip"]["enabled"] = False
 
-        bl_path = self.config["filter"]["blacklist"]
+        bl_path = str(resolve_path(self.config["filter"]["blacklist"]))
         if os.path.exists(bl_path):
             with open(bl_path, "r") as f:
                 self.blacklist = {l.strip() for l in f if l.strip()}
@@ -829,7 +948,7 @@ class UPOEngine:
                 )
 
         if self.config["history"]["enabled"]:
-            self.history = ProxyHistory(self.config["history"]["db_path"])
+            self.history = ProxyHistory(str(resolve_path(self.config["history"]["db_path"])))
             s = self.history.get_stats()
             console.print(
                 f"[green]✓[/] History DB: {s['total_tracked']:,} tracked."
@@ -837,7 +956,7 @@ class UPOEngine:
 
         if self.config["verified_db"]["enabled"]:
             self.verified_db = VerifiedProxyDB(
-                self.config["verified_db"]["db_path"]
+                str(resolve_path(self.config["verified_db"]["db_path"]))
             )
             vcount = self.verified_db.count()
             console.print(
@@ -905,10 +1024,12 @@ class UPOEngine:
             for api in API_SOURCES:
                 proto = api["protocol"]
                 if proto == "mixed":
-                    proto = "http"
+                    proto_enum = ProxyProtocol.HTTP
+                else:
+                    proto_enum = ProxyProtocol(proto)
                 tasks.append(
                     self._fetch(
-                        session, api["url"], ProxyProtocol(proto),
+                        session, api["url"], proto_enum,
                         api.get("format"),
                     )
                 )
@@ -924,7 +1045,7 @@ class UPOEngine:
                     await coro
                     prog.update(tid, advance=1)
 
-        cf = self.config["crawl4ai"]["output_file"]
+        cf = str(resolve_path(self.config["crawl4ai"]["output_file"]))
         if self.config["crawl4ai"]["enabled"] and os.path.exists(cf):
             try:
                 with open(cf) as f:
@@ -939,8 +1060,8 @@ class UPOEngine:
                             ),
                             source=p.get("source", "crawl4ai"),
                         )
-                        if px.address not in self.proxies:
-                            self.proxies[px.address] = px
+                        if px.id not in self.proxies:
+                            self.add_proxy(px)
                             count += 1
                     except (ValueError, KeyError):
                         continue
@@ -962,8 +1083,8 @@ class UPOEngine:
                         protocol=ProxyProtocol(row["protocol"]),
                         source="verified_db",
                     )
-                    if px.address not in self.proxies:
-                        self.proxies[px.address] = px
+                    if px.id not in self.proxies:
+                        self.add_proxy(px)
                         loaded += 1
                 except (ValueError, KeyError):
                     continue
@@ -982,6 +1103,16 @@ class UPOEngine:
         for attempt in range(3):
             try:
                 async with session.get(url, ssl=False) as r:
+                    if r.status in RETRYABLE_STATUSES:
+                        delay = 2 ** attempt + random.random()
+                        retry_after = r.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                delay = max(delay, float(retry_after))
+                            except ValueError:
+                                pass
+                        await asyncio.sleep(delay)
+                        continue
                     if r.status != 200:
                         return
                     content = await r.text()
@@ -995,43 +1126,84 @@ class UPOEngine:
                 if attempt < 2:
                     await asyncio.sleep(1 + attempt)
             except Exception:
+                if attempt < 2:
+                    await asyncio.sleep(1 + attempt)
+                    continue
                 return
 
     def _parse_text(self, content: str, proto: ProxyProtocol, source: str):
-        for m in PROXY_REGEX.finditer(content):
+        for match in PROXY_REGEX.finditer(content):
+            ip = match.group("ip")
+            raw_port = match.group("port")
+            raw_protocol = match.group("protocol")
+            username = match.group("username")
+            password = match.group("password")
             try:
-                ip = m.group("ip")
-                port = int(m.group("port"))
-                ps = m.group("protocol")
-                protocol = ProxyProtocol(ps) if ps else proto
-                px = Proxy(
-                    ip=ip, port=port, protocol=protocol, source=source
-                )
-                if px.address not in self.proxies:
-                    self.proxies[px.address] = px
-            except (ValueError, KeyError):
+                ip_address(ip)
+                port = int(raw_port)
+            except ValueError:
                 continue
+            if not 1 <= port <= 65535:
+                continue
+            try:
+                protocol = (
+                    ProxyProtocol(raw_protocol.lower())
+                    if raw_protocol
+                    else proto
+                )
+            except ValueError:
+                continue
+            self.add_proxy(
+                Proxy(
+                    ip=ip,
+                    port=port,
+                    protocol=protocol,
+                    source=source,
+                    username=username or None,
+                    password=password or None,
+                )
+            )
 
     def _parse_json(self, content: str, source: str):
         try:
             data = json.loads(content)
-            items = data.get("data", []) if isinstance(data, dict) else data
-            for it in items:
+        except json.JSONDecodeError:
+            return
+        items = data.get("data", []) if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ip = str(item.get("ip", "")).strip()
+            try:
+                ip_address(ip)
+            except ValueError:
+                continue
+            try:
+                port = int(item.get("port", 0))
+            except (TypeError, ValueError):
+                continue
+            if not 1 <= port <= 65535:
+                continue
+            raw_protocols = item.get("protocols", ["http"])
+            if isinstance(raw_protocols, str):
+                raw_protocols = re.split(r"[,|/\s]+", raw_protocols)
+            if not isinstance(raw_protocols, list) or not raw_protocols:
+                raw_protocols = ["http"]
+            for raw_protocol in raw_protocols:
                 try:
-                    ip = it.get("ip", "").strip()
-                    port = int(it.get("port", 0))
-                    protocols = it.get("protocols", ["http"])
-                    pr = protocols[0].lower() if protocols else "http"
-                    px = Proxy(
-                        ip=ip, port=port, protocol=ProxyProtocol(pr),
+                    protocol = ProxyProtocol(str(raw_protocol).lower().strip())
+                except ValueError:
+                    continue
+                self.add_proxy(
+                    Proxy(
+                        ip=ip,
+                        port=port,
+                        protocol=protocol,
                         source=source,
                     )
-                    if px.address not in self.proxies:
-                        self.proxies[px.address] = px
-                except (ValueError, KeyError):
-                    continue
-        except json.JSONDecodeError:
-            pass
+                )
 
     # ── Pre-Enrich ────────────────────────────────────────────────────────
 
@@ -1067,39 +1239,99 @@ class UPOEngine:
 
     def filter_garbage(self):
         before = len(self.proxies)
-        self.proxies, rstats = self.ip_filter.filter_batch(
-            self.proxies, self.config
-        )
+
+        # ── Track per-source contamination BEFORE we delete anything ──────
+        # Build a snapshot: ip → source, for proxies we are about to
+        # examine so that after deletion we can report which sources fed
+        # the most garbage.
+        _src: Dict[str, str] = {
+            addr: p.source for addr, p in self.proxies.items()
+        }
+        # Counts: source → reason → count
+        source_garbage: Dict[str, Counter] = {}
+
+        def _record(addr: str, reason: str):
+            src = _src.get(addr, "unknown")
+            # Shorten raw GitHub/CDN URLs to just the hostname for readability
+            if src.startswith("http"):
+                try:
+                    src = src.split("/")[2]
+                except IndexError:
+                    pass
+            source_garbage.setdefault(src, Counter())[reason] += 1
+
+        # ── IP-range / port / country filter ──────────────────────────────
+        # We need to do this manually (not via filter_batch) so we can
+        # record which source each dropped proxy came from.
+        valid: Dict[str, Proxy] = {}
+        rstats: Counter = Counter()
+        for addr, p in self.proxies.items():
+            try:
+                ip_address(p.ip)
+            except ValueError:
+                rstats["invalid_ip"] += 1
+                _record(addr, "invalid_ip")
+                continue
+            if self.ip_filter.is_private(p.ip):
+                rstats["private_ip"] += 1
+                _record(addr, "private_ip")
+                continue
+            if self.ip_filter.is_cloudflare(p.ip):
+                rstats["cloudflare_ip"] += 1
+                _record(addr, "cloudflare_ip")
+                continue
+            if p.port < 1 or p.port > 65535:
+                rstats["invalid_port"] += 1
+                _record(addr, "invalid_port")
+                continue
+            allowed = self.config["filter"].get("allowed_countries", [])
+            blocked = self.config["filter"].get("blocked_countries", [])
+            if allowed and p.country_code not in allowed:
+                rstats["country_filtered"] += 1
+                _record(addr, "country_filtered")
+                continue
+            if blocked and p.country_code in blocked:
+                rstats["country_blocked"] += 1
+                _record(addr, "country_blocked")
+                continue
+            valid[addr] = p
+        self.proxies = valid
+
+        # ── CDN ASN filter ─────────────────────────────────────────────────
         cdn_rm = [
             a for a, p in self.proxies.items()
             if p.asn and p.asn in CDN_ASNS
         ]
         for a in cdn_rm:
+            _record(a, "cdn_asn")
             del self.proxies[a]
         rstats["cdn_asn"] = len(cdn_rm)
 
+        # ── Blacklist filter ───────────────────────────────────────────────
         bl_rm = [
             a for a, p in self.proxies.items() if p.ip in self.blacklist
         ]
         for a in bl_rm:
+            _record(a, "blacklisted")
             del self.proxies[a]
         rstats["blacklisted"] = len(bl_rm)
 
+        # ── Datacenter filter (optional) ───────────────────────────────────
         if self.config["filter"].get("exclude_datacenters"):
             dc_rm = [
                 a for a, p in self.proxies.items()
                 if p.proxy_type == ProxyType.DATACENTER
             ]
             for a in dc_rm:
+                _record(a, "datacenter")
                 del self.proxies[a]
             rstats["datacenter"] = len(dc_rm)
 
-        # ── Per /24 subnet cap — prevents single datacenter flooding ──────
+        # ── Per /24 subnet cap — prevents single datacenter flooding ───────
         subnet_cap = self.config["filter"].get("max_per_subnet", 50)
         if subnet_cap and subnet_cap > 0:
             subnet_counts: Counter = Counter()
             subnet_rm = []
-            # Sort by source so verified_db proxies are kept first
             priority_order = sorted(
                 self.proxies.items(),
                 key=lambda x: (0 if x[1].source == "verified_db" else 1)
@@ -1116,6 +1348,7 @@ class UPOEngine:
                     continue
             for a in subnet_rm:
                 if a in self.proxies:
+                    _record(a, "subnet_capped")
                     del self.proxies[a]
             rstats["subnet_capped"] = len(subnet_rm)
 
@@ -1131,6 +1364,35 @@ class UPOEngine:
         for reason, count in sorted(rstats.items(), key=lambda x: -x[1]):
             if count > 0:
                 console.print(f"    [red]✗[/] {reason}: {count:,}")
+
+        # ── Source contamination leaderboard ──────────────────────────────
+        # Rank sources by total garbage they contributed.
+        # This identifies which upstream feeds are polluted so you can
+        # remove or deprioritise them.
+        if source_garbage:
+            # Total dropped per source
+            src_totals = {
+                src: sum(c.values())
+                for src, c in source_garbage.items()
+            }
+            top_polluters = sorted(
+                src_totals.items(), key=lambda x: -x[1]
+            )[:10]
+            console.print(
+                "\n  [bold yellow]Noisy Sources (top garbage contributors):[/bold yellow]"
+            )
+            for src, total in top_polluters:
+                breakdown = source_garbage[src]
+                # Show the top 2 reasons for this source
+                top_reasons = ", ".join(
+                    f"{r}={n}"
+                    for r, n in breakdown.most_common(2)
+                )
+                console.print(
+                    f"    [yellow]⚠[/] {src}: "
+                    f"[red]{total:,}[/red] dropped "
+                    f"[dim]({top_reasons})[/dim]"
+                )
 
     # ── Judge Testing ─────────────────────────────────────────────────────
 
@@ -1183,66 +1445,60 @@ class UPOEngine:
     # ── TCP Pre-Filter ────────────────────────────────────────────────────
 
     async def tcp_prefilter(self):
-        """
-        Fast TCP connect sweep — eliminates unreachable proxies in <90s.
-        No HTTP overhead, just checks if the port accepts connections.
-        Runs BEFORE full verification to dramatically shrink the check pool.
-        """
-        total = len(self.proxies)
+        proxies = list(self.proxies.values())
+        total = len(proxies)
+        if not proxies:
+            return
+        concurrency = self._phase_concurrency("tcp", 200)
+        timeout = self.config["general"].get("timeout_connect", 3)
         console.print(
             f"\n[cyan]TCP pre-filter: {total:,} proxies "
-            f"(3s connect timeout)...[/cyan]"
+            f"({timeout}s timeout, concurrency {concurrency})...[/cyan]"
         )
-        sem = asyncio.Semaphore(500)
+        completed = 0
         reachable = 0
+        lock = asyncio.Lock()
 
-        async def tcp_check(proxy: Proxy):
-            nonlocal reachable
-            async with sem:
+        async def check(proxy: Proxy):
+            nonlocal completed, reachable
+            try:
+                _, writer = await asyncio.wait_for(
+                    asyncio.open_connection(proxy.ip, proxy.port),
+                    timeout=timeout,
+                )
+                writer.close()
                 try:
-                    conn = asyncio.open_connection(proxy.ip, proxy.port)
-                    reader, writer = await asyncio.wait_for(conn, timeout=3.0)
-                    writer.close()
-                    try:
-                        await writer.wait_closed()
-                    except Exception:
-                        pass
-                    proxy._tcp_ok = True
-                    reachable += 1
+                    await writer.wait_closed()
                 except Exception:
-                    proxy._tcp_ok = False
+                    pass
+                proxy.tcp_reachable = True
+                async with lock:
+                    reachable += 1
+            except Exception:
+                proxy.tcp_reachable = False
+            finally:
+                async with lock:
+                    completed += 1
 
-        with Progress(
-            SpinnerColumn(), TextColumn("{task.description}"),
-            BarColumn(), MofNCompleteColumn(),
-            TextColumn("│ Open: {task.fields[reachable]}"),
-            TimeRemainingColumn(),
-        ) as prog:
-            tid = prog.add_task(
-                "[cyan]TCP ping...", total=total, reachable=0
-            )
-
-            async def worker(p):
-                await tcp_check(p)
-                prog.update(tid, advance=1, reachable=reachable)
-
-            await asyncio.gather(*[worker(p) for p in self.proxies.values()])
-
-        # Remove TCP-dead proxies from the pool entirely
+        await run_bounded(proxies, check, concurrency)
         before = len(self.proxies)
-        self.proxies = {
-            a: p for a, p in self.proxies.items()
-            if getattr(p, "_tcp_ok", False)
+        dropped = {
+            proxy.id: proxy
+            for proxy in self.proxies.values()
+            if not proxy.tcp_reachable
         }
-        after = len(self.proxies)
-        removed = before - after
-        pct = removed / max(before, 1) * 100
-        # ← Save for correct Total Raw stat in print_stats()
+        self.failed_proxies.update(dropped)
+        self.proxies = {
+            proxy.id: proxy
+            for proxy in self.proxies.values()
+            if proxy.tcp_reachable
+        }
+        removed = before - len(self.proxies)
         self.stats["tcp_prefilter_removed"] = removed
         console.print(
             f"[green]✓[/] TCP pre-filter: "
-            f"{before:,} → {after:,} "
-            f"([red]-{removed:,} / {pct:.0f}% dead removed[/red])"
+            f"{before:,} → {len(self.proxies):,} "
+            f"([red]-{removed:,} dead[/red])"
         )
 
     # ── Verification ──────────────────────────────────────────────────────
@@ -1283,12 +1539,8 @@ class UPOEngine:
                 )
                 await asyncio.sleep(3)
 
-            sem = asyncio.Semaphore(self.config["general"]["concurrency"])
+            conc = self._phase_concurrency("verification", 100)
             alive_count = 0
-
-            # FIX #3: Use verification judge (module 0), rotate per round
-            judge_idx = (round_num - 1) % len(self.judges)
-            judge_url = self.judges[judge_idx][0]
 
             with Progress(
                 SpinnerColumn(), TextColumn("{task.description}"),
@@ -1301,32 +1553,43 @@ class UPOEngine:
                     total=len(to_check), alive=0,
                 )
 
-                async def worker(p):
-                    nonlocal alive_count
-                    async with sem:
-                        await self._check_one(p, judge_url)
-                    if p.alive:
-                        alive_count += 1
-                    prog.update(tid, advance=1, alive=alive_count)
+                # Create ONE shared session for HTTP/HTTPS proxies (reused per-round).
+                # SOCKS proxies get their own per-request sessions in _check_one.
+                shared_http = aiohttp.ClientSession(
+                    connector=aiohttp.TCPConnector(ssl=False, limit=conc),
+                    headers=self.headers,
+                )
+                try:
+                    async def _verify_worker(p):
+                        nonlocal alive_count
+                        judge_url = await self._next_judge()
+                        await self._check_one(
+                            p, judge_url, shared_http=shared_http
+                        )
+                        if p.alive:
+                            alive_count += 1
+                        prog.update(tid, advance=1, alive=alive_count)
 
-                # Process in 5k chunks to keep memory and sockets flat
-                CHUNK_SIZE = 5000
-                for chunk_start in range(0, len(to_check), CHUNK_SIZE):
-                    chunk = to_check[chunk_start:chunk_start + CHUNK_SIZE]
-                    await asyncio.gather(*[worker(p) for p in chunk])
-                    # Brief pause between chunks — lets OS reclaim sockets
-                    if chunk_start + CHUNK_SIZE < len(to_check):
-                        await asyncio.sleep(0.3)
+                    # Process in 5k chunks to keep sockets flat
+                    CHUNK_SIZE = 5000
+                    for chunk_start in range(0, len(to_check), CHUNK_SIZE):
+                        chunk = to_check[chunk_start:chunk_start + CHUNK_SIZE]
+                        await run_bounded(chunk, _verify_worker, conc)
+                        # Brief pause between chunks — lets OS reclaim sockets
+                        if chunk_start + CHUNK_SIZE < len(to_check):
+                            await asyncio.sleep(0.3)
+                finally:
+                    await shared_http.close()
 
-        # Reliability threshold — >= 0.5 means majority pass required
+        # Reliability threshold — STRICT majority required (FIX #2)
         # 1 round:  1/1=1.0 ✓   0/1=0.0 ✗
-        # 2 rounds: 2/2=1.0 ✓   1/2=0.5 ✓   0/2=0.0 ✗
+        # 2 rounds: 2/2=1.0 ✓   1/2=0.5 ✗   0/2=0.0 ✗
         # 3 rounds: 3/3=1.0 ✓   2/3=0.67 ✓  1/3=0.33 ✗
         rounds = self.config["general"].get("verification_rounds", 1)
         for p in self.proxies.values():
             if p.check_count > 0:
                 p.reliability = round(p.success_count / p.check_count, 2)
-                p.alive = p.reliability >= 0.5
+                p.alive = p.reliability > 0.5
             else:
                 p.alive = False
 
@@ -1334,22 +1597,49 @@ class UPOEngine:
         self.stats["verified_alive"] = sum(
             1 for p in self.proxies.values() if p.alive
         )
+        dead = {
+            pid: proxy
+            for pid, proxy in self.proxies.items()
+            if not proxy.alive
+        }
+        self.failed_proxies.update(dead)
+        self.proxies = {
+            pid: proxy
+            for pid, proxy in self.proxies.items()
+            if proxy.alive
+        }
 
-    async def _check_one(self, proxy: Proxy, judge_url: str):
+    async def _check_one(
+        self,
+        proxy: Proxy,
+        judge_url: str,
+        shared_http: Optional[aiohttp.ClientSession] = None,
+    ):
         proxy.check_count += 1
         proxy.last_checked = datetime.now(timezone.utc).isoformat()
         timeout = aiohttp.ClientTimeout(
             total=self.config["general"]["timeout_total"],
             connect=self.config["general"]["timeout_connect"],
         )
-        session, kwargs = self._create_proxy_session(proxy, timeout)
+
+        is_socks = proxy.protocol in (ProxyProtocol.SOCKS4, ProxyProtocol.SOCKS5)
+        if is_socks or shared_http is None:
+            # SOCKS needs per-proxy connector; fallback if no shared session
+            session, kwargs = self._create_proxy_session(proxy, timeout)
+            close_after = True
+        else:
+            # HTTP/HTTPS: reuse the shared session, pass proxy URL as kwarg
+            session = shared_http
+            kwargs = {"proxy": proxy.url}
+            close_after = False
+
         if not session:
             proxy.alive = False
             proxy.fail_count += 1
             return
         try:
             start = time.monotonic()
-            async with session.get(judge_url, **kwargs) as r:
+            async with session.get(judge_url, timeout=timeout, **kwargs) as r:
                 latency_ms = int((time.monotonic() - start) * 1000)
                 if r.status == 200:
                     body = (await r.text()).strip()
@@ -1361,8 +1651,11 @@ class UPOEngine:
             proxy.alive = False
             proxy.fail_count += 1
         finally:
-            await session.close()
-            await asyncio.sleep(0.01)
+            if close_after:
+                await session.close()
+            delay = self.config["general"].get("per_request_delay", 0)
+            if delay and delay > 0:
+                await asyncio.sleep(delay)
 
     def _validate_judge(self, body: str, proxy: Proxy, latency_ms: int):
         if not body or len(body) > 5000:
@@ -1413,14 +1706,14 @@ class UPOEngine:
     # ── Anonymity (FIX #3: uses judge module 1, FIX #5: 5s timeout) ──────
 
     async def check_anonymity(self):
-        alive = [p for p in self.proxies.values() if p.alive]
+        alive = self.select_candidates("max_anonymity_checks")
         if not alive or not self.my_ip:
             return
 
         console.print(
             f"\n[cyan]Anonymity check on {len(alive)} proxies...[/cyan]"
         )
-        sem = asyncio.Semaphore(self.config["general"]["concurrency"])
+        conc = self._phase_concurrency("anonymity", 50)
 
         # Anonymity MUST use httpbin.org/headers (only public judge
         # that returns full HTTP headers for Via/X-Forwarded-For analysis)
@@ -1432,12 +1725,18 @@ class UPOEngine:
         ) as prog:
             tid = prog.add_task("[cyan]Anonymity...", total=len(alive))
 
-            async def worker(p):
-                async with sem:
-                    await self._anon_check_one(p)
-                prog.update(tid, advance=1)
+            shared_http = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=False, limit=conc),
+                headers=self.headers,
+            )
+            try:
+                async def _anon_worker(p):
+                    await self._anon_check_one(p, shared_http=shared_http)
+                    prog.update(tid, advance=1)
 
-            await asyncio.gather(*[worker(p) for p in alive])
+                await run_bounded(alive, _anon_worker, conc)
+            finally:
+                await shared_http.close()
 
         ac = Counter(p.anonymity for p in alive if p.anonymity)
         console.print(
@@ -1446,18 +1745,31 @@ class UPOEngine:
             f"Trans: {ac.get(AnonymityLevel.TRANSPARENT, 0)}"
         )
 
-    async def _anon_check_one(self, proxy: Proxy):
+    async def _anon_check_one(
+        self,
+        proxy: Proxy,
+        shared_http: Optional[aiohttp.ClientSession] = None,
+    ):
         # FIX #5: Shorter 5s timeout for anonymity — httpbin is slow
         timeout = aiohttp.ClientTimeout(total=5, connect=3)
-        session, kwargs = self._create_proxy_session(proxy, timeout)
+
+        is_socks = proxy.protocol in (ProxyProtocol.SOCKS4, ProxyProtocol.SOCKS5)
+        if is_socks or shared_http is None:
+            session, kwargs = self._create_proxy_session(proxy, timeout)
+            close_after = True
+        else:
+            session = shared_http
+            kwargs = {"proxy": proxy.url}
+            close_after = False
+
         if not session:
-            proxy.anonymity = AnonymityLevel.ANONYMOUS
+            proxy.anonymity = None
             return
         try:
             # httpbin.org/headers is the only judge that returns full headers
             # so we must use it specifically here regardless of rotation
             url = "http://httpbin.org/headers"
-            async with session.get(url, **kwargs) as r:
+            async with session.get(url, timeout=timeout, **kwargs) as r:
                 if r.status == 200:
                     data = await r.json()
                     headers = data.get("headers", {})
@@ -1479,27 +1791,18 @@ class UPOEngine:
 
                     proxy.anonymity = AnonymityLevel.ELITE
                 else:
-                    proxy.anonymity = AnonymityLevel.ANONYMOUS
+                    proxy.anonymity = None
         except asyncio.TimeoutError:
-            # httpbin timed out — default to anonymous, not crash
-            proxy.anonymity = AnonymityLevel.ANONYMOUS
+            proxy.anonymity = None
         except Exception as e:
-            proxy.anonymity = AnonymityLevel.ANONYMOUS
+            proxy.anonymity = None
             # These are all expected/normal for SOCKS5 → HTTP tunnel failures
             EXPECTED_ERRORS = {
-                "ClientError",
-                "ServerDisconnectedError",
-                "ClientOSError",
-                "ClientConnectorError",
-                "ClientProxyConnectionError",
-                "ProxyConnectionError",
-                "ProxyError",
-                "IncompleteReadError",
-                "ContentTypeError",
-                "JSONDecodeError",
-                "ServerTimeoutError",
-                "ClientResponseError",
-                "TooManyRedirects",
+                "ClientError", "ServerDisconnectedError", "ClientOSError",
+                "ClientConnectorError", "ClientProxyConnectionError",
+                "ProxyConnectionError", "ProxyError", "IncompleteReadError",
+                "ContentTypeError", "JSONDecodeError", "ServerTimeoutError",
+                "ClientResponseError", "TooManyRedirects",
             }
             err_name = type(e).__name__
             if err_name not in EXPECTED_ERRORS:
@@ -1508,24 +1811,24 @@ class UPOEngine:
                     f"{err_name}: {e}[/dim red]"
                 )
         finally:
-            await session.close()
+            if close_after:
+                await session.close()
 
     # ── Protocol Detection (FIX #3: judge module 2, FIX #4: dedup) ────────
 
     async def detect_protocols(self):
         if not self.config["protocol_detection"]["enabled"]:
             return
-        alive = [p for p in self.proxies.values() if p.alive]
+        alive = self.select_candidates("max_protocol_checks")
         if not alive:
             return
 
-        # FIX #3: Use protocol detection judge (module 2)
         judge_url = self._get_judge(2)
         console.print(
             f"\n[cyan]Protocol detection on {len(alive)} proxies...[/cyan]"
         )
         console.print(f"  [dim]Using judge: {judge_url}[/dim]")
-        sem = asyncio.Semaphore(self.config["general"]["concurrency"])
+        conc = self._phase_concurrency("protocol", 30)
 
         with Progress(
             SpinnerColumn(), TextColumn("{task.description}"),
@@ -1533,29 +1836,55 @@ class UPOEngine:
         ) as prog:
             tid = prog.add_task("[cyan]Protocols...", total=len(alive))
 
-            async def worker(p):
-                async with sem:
-                    await self._detect_protocols_one(p, judge_url)
-                prog.update(tid, advance=1)
+            # HTTP shared session for the initial probe
+            shared_http = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=False, limit=conc),
+                headers=self.headers,
+            )
+            try:
+                async def _proto_worker(p):
+                    await self._detect_protocols_one(
+                        p, judge_url, shared_http=shared_http
+                    )
+                    prog.update(tid, advance=1)
 
-            await asyncio.gather(*[worker(p) for p in alive])
+                await run_bounded(alive, _proto_worker, conc)
+            finally:
+                await shared_http.close()
 
         multi = sum(1 for p in alive if len(p.detected_protocols) > 1)
         console.print(f"[green]✓[/] {multi} proxies support 2+ protocols.")
 
-    async def _detect_protocols_one(self, proxy: Proxy, judge_url: str):
+    async def _detect_protocols_one(
+        self,
+        proxy: Proxy,
+        judge_url: str,
+        shared_http: Optional[aiohttp.ClientSession] = None,
+    ):
         proxy.detected_protocols = []
         timeout = aiohttp.ClientTimeout(total=8, connect=5)
-        for proto in [ProxyProtocol.SOCKS5, ProxyProtocol.SOCKS4,
-                      ProxyProtocol.HTTPS, ProxyProtocol.HTTP]:
+        protocols_to_test = [proxy.protocol]
+        if self.config["protocol_detection"].get("deep_scan", False):
+            for candidate in ProxyProtocol:
+                if candidate not in protocols_to_test:
+                    protocols_to_test.append(candidate)
+        for proto in protocols_to_test:
             test_proxy = Proxy(
-                ip=proxy.ip, port=proxy.port, protocol=proto, source=""
+                ip=proxy.ip, port=proxy.port, protocol=proto, source="",
+                username=proxy.username, password=proxy.password,
             )
-            session, kwargs = self._create_proxy_session(test_proxy, timeout)
+            is_socks = proto in (ProxyProtocol.SOCKS4, ProxyProtocol.SOCKS5)
+            if is_socks or shared_http is None:
+                session, kwargs = self._create_proxy_session(test_proxy, timeout)
+                close_after = True
+            else:
+                session = shared_http
+                kwargs = {"proxy": test_proxy.url}
+                close_after = False
             if not session:
                 continue
             try:
-                async with session.get(judge_url, **kwargs) as r:
+                async with session.get(judge_url, timeout=timeout, **kwargs) as r:
                     if r.status == 200:
                         text = await r.text()
                         if re.search(r"\d+\.\d+\.\d+\.\d+", text):
@@ -1563,7 +1892,8 @@ class UPOEngine:
                             if proto == ProxyProtocol.HTTP:
                                 try:
                                     async with session.get(
-                                        "https://httpbin.org/ip", **kwargs
+                                        "https://httpbin.org/ip",
+                                        timeout=timeout, **kwargs
                                     ) as r2:
                                         if r2.status == 200:
                                             proxy.supports_https = True
@@ -1572,7 +1902,8 @@ class UPOEngine:
             except Exception:
                 pass
             finally:
-                await session.close()
+                if close_after:
+                    await session.close()
 
         # FIX #4: Deduplicate detected protocols
         proxy.detected_protocols = list(
@@ -1584,7 +1915,7 @@ class UPOEngine:
     async def speed_test(self):
         if not self.config["speed_test"]["enabled"]:
             return
-        alive = [p for p in self.proxies.values() if p.alive]
+        alive = self.select_candidates("max_speed_checks")
         if not alive:
             return
 
@@ -1592,7 +1923,7 @@ class UPOEngine:
         console.print(
             f"\n[cyan]Speed testing {len(alive)} proxies (100KB)...[/cyan]"
         )
-        sem = asyncio.Semaphore(self.config["general"]["concurrency"])
+        conc = self._phase_concurrency("speed", 20)
 
         with Progress(
             SpinnerColumn(), TextColumn("{task.description}"),
@@ -1600,12 +1931,20 @@ class UPOEngine:
         ) as prog:
             tid = prog.add_task("[cyan]Speed test...", total=len(alive))
 
-            async def worker(p):
-                async with sem:
-                    await self._speed_test_one(p, test_url)
-                prog.update(tid, advance=1)
+            shared_http = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=False, limit=conc),
+                headers=self.headers,
+            )
+            try:
+                async def _speed_worker(p):
+                    await self._speed_test_one(
+                        p, test_url, shared_http=shared_http
+                    )
+                    prog.update(tid, advance=1)
 
-            await asyncio.gather(*[worker(p) for p in alive])
+                await run_bounded(alive, _speed_worker, conc)
+            finally:
+                await shared_http.close()
 
         tested = [
             p for p in alive if p.download_speed_kbps is not None
@@ -1617,14 +1956,26 @@ class UPOEngine:
                 f"Avg: {avg:.1f} KB/s"
             )
 
-    async def _speed_test_one(self, proxy: Proxy, test_url: str):
+    async def _speed_test_one(
+        self,
+        proxy: Proxy,
+        test_url: str,
+        shared_http: Optional[aiohttp.ClientSession] = None,
+    ):
         timeout = aiohttp.ClientTimeout(total=20, connect=8)
-        session, kwargs = self._create_proxy_session(proxy, timeout)
+        is_socks = proxy.protocol in (ProxyProtocol.SOCKS4, ProxyProtocol.SOCKS5)
+        if is_socks or shared_http is None:
+            session, kwargs = self._create_proxy_session(proxy, timeout)
+            close_after = True
+        else:
+            session = shared_http
+            kwargs = {"proxy": proxy.url}
+            close_after = False
         if not session:
             return
         try:
             start = time.monotonic()
-            async with session.get(test_url, **kwargs) as r:
+            async with session.get(test_url, timeout=timeout, **kwargs) as r:
                 if r.status == 200:
                     data = await r.read()
                     elapsed = time.monotonic() - start
@@ -1635,21 +1986,22 @@ class UPOEngine:
         except Exception:
             pass
         finally:
-            await session.close()
+            if close_after:
+                await session.close()
 
     # ── TCP Fingerprint (FIX #3: uses judge module 3) ─────────────────────
 
     async def fingerprint(self):
         if not self.config["stealth_score"]["enabled"]:
             return
-        alive = [p for p in self.proxies.values() if p.alive]
+        alive = self.select_candidates("max_fingerprint_checks")
         if not alive:
             return
 
         console.print(
             f"\n[cyan]TCP fingerprinting {len(alive)} proxies...[/cyan]"
         )
-        sem = asyncio.Semaphore(self.config["general"]["concurrency"])
+        conc = self._phase_concurrency("fingerprint", 30)
 
         with Progress(
             SpinnerColumn(), TextColumn("{task.description}"),
@@ -1657,12 +2009,18 @@ class UPOEngine:
         ) as prog:
             tid = prog.add_task("[cyan]Fingerprint...", total=len(alive))
 
-            async def worker(p):
-                async with sem:
-                    await self._fingerprint_one(p)
-                prog.update(tid, advance=1)
+            shared_http = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=False, limit=conc),
+                headers=self.headers,
+            )
+            try:
+                async def _fp_worker(p):
+                    await self._fingerprint_one(p, shared_http=shared_http)
+                    prog.update(tid, advance=1)
 
-            await asyncio.gather(*[worker(p) for p in alive])
+                await run_bounded(alive, _fp_worker, conc)
+            finally:
+                await shared_http.close()
 
         fp_counts = Counter(
             p.tcp_fingerprint for p in alive if p.tcp_fingerprint
@@ -1672,14 +2030,25 @@ class UPOEngine:
             + " │ ".join(f"{k}:{v}" for k, v in fp_counts.most_common())
         )
 
-    async def _fingerprint_one(self, proxy: Proxy):
+    async def _fingerprint_one(
+        self,
+        proxy: Proxy,
+        shared_http: Optional[aiohttp.ClientSession] = None,
+    ):
         timeout = aiohttp.ClientTimeout(total=10, connect=5)
-        session, kwargs = self._create_proxy_session(proxy, timeout)
+        is_socks = proxy.protocol in (ProxyProtocol.SOCKS4, ProxyProtocol.SOCKS5)
+        if is_socks or shared_http is None:
+            session, kwargs = self._create_proxy_session(proxy, timeout)
+            close_after = True
+        else:
+            session = shared_http
+            kwargs = {"proxy": proxy.url}
+            close_after = False
         if not session:
             return
         try:
             async with session.get(
-                "https://1.1.1.1/cdn-cgi/trace", **kwargs
+                "https://1.1.1.1/cdn-cgi/trace", timeout=timeout, **kwargs
             ) as r:
                 if r.status == 200:
                     text = await r.text()
@@ -1701,7 +2070,8 @@ class UPOEngine:
         except Exception:
             pass
         finally:
-            await session.close()
+            if close_after:
+                await session.close()
 
     # FIX #1: Stealth calculation is now a SEPARATE method
     # called AFTER fraud scoring in the categorize phase
@@ -1766,14 +2136,18 @@ class UPOEngine:
     async def dns_leak_check(self):
         if not self.config["dns_leak"]["enabled"] or not self.my_ip:
             return
-        alive = [p for p in self.proxies.values() if p.alive]
+        alive = self.select_candidates("max_dns_checks")
         if not alive:
             return
 
         console.print(
-            f"\n[cyan]DNS leak testing {len(alive)} proxies...[/cyan]"
+            f"\n[cyan]Egress-IP check on {len(alive)} proxies...[/cyan]"
         )
-        sem = asyncio.Semaphore(self.config["general"]["concurrency"])
+        console.print(
+            "[yellow]Note: this is an egress-IP check, "
+            "not a full DNS-leak test.[/yellow]"
+        )
+        conc = self._phase_concurrency("dns", 30)
 
         with Progress(
             SpinnerColumn(), TextColumn("{task.description}"),
@@ -1781,27 +2155,44 @@ class UPOEngine:
         ) as prog:
             tid = prog.add_task("[cyan]DNS leak...", total=len(alive))
 
-            async def worker(p):
-                async with sem:
-                    await self._dns_leak_one(p)
-                prog.update(tid, advance=1)
+            shared_http = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=False, limit=conc),
+                headers=self.headers,
+            )
+            try:
+                async def _dns_worker(p):
+                    await self._dns_leak_one(p, shared_http=shared_http)
+                    prog.update(tid, advance=1)
 
-            await asyncio.gather(*[worker(p) for p in alive])
+                await run_bounded(alive, _dns_worker, conc)
+            finally:
+                await shared_http.close()
 
         leaking = sum(1 for p in alive if p.dns_leak is True)
         clean = sum(1 for p in alive if p.dns_leak is False)
         console.print(
-            f"[green]✓[/] DNS: {clean} clean, {leaking} leaking."
+            f"[green]✓[/] Egress IP: {clean} hidden, {leaking} match local IP."
         )
 
-    async def _dns_leak_one(self, proxy: Proxy):
+    async def _dns_leak_one(
+        self,
+        proxy: Proxy,
+        shared_http: Optional[aiohttp.ClientSession] = None,
+    ):
         timeout = aiohttp.ClientTimeout(total=10, connect=5)
-        session, kwargs = self._create_proxy_session(proxy, timeout)
+        is_socks = proxy.protocol in (ProxyProtocol.SOCKS4, ProxyProtocol.SOCKS5)
+        if is_socks or shared_http is None:
+            session, kwargs = self._create_proxy_session(proxy, timeout)
+            close_after = True
+        else:
+            session = shared_http
+            kwargs = {"proxy": proxy.url}
+            close_after = False
         if not session:
             return
         try:
             async with session.get(
-                "https://1.1.1.1/cdn-cgi/trace", **kwargs
+                "https://1.1.1.1/cdn-cgi/trace", timeout=timeout, **kwargs
             ) as r:
                 if r.status == 200:
                     text = await r.text()
@@ -1813,14 +2204,15 @@ class UPOEngine:
         except Exception:
             pass
         finally:
-            await session.close()
+            if close_after:
+                await session.close()
 
     # ── Ban Check ─────────────────────────────────────────────────────────
 
     async def check_bans(self):
         if not self.config["ban_check"]["enabled"]:
             return
-        alive = [p for p in self.proxies.values() if p.alive]
+        alive = self.select_candidates("max_ban_checks")
         if not alive:
             return
 
@@ -1829,7 +2221,7 @@ class UPOEngine:
             f"\n[cyan]Ban check on {len(alive)} proxies "
             f"({len(sites)} sites)...[/cyan]"
         )
-        sem = asyncio.Semaphore(self.config["general"]["concurrency"])
+        conc = self._phase_concurrency("ban", 20)
 
         with Progress(
             SpinnerColumn(), TextColumn("{task.description}"),
@@ -1837,31 +2229,49 @@ class UPOEngine:
         ) as prog:
             tid = prog.add_task("[cyan]Ban check...", total=len(alive))
 
-            async def worker(p):
-                async with sem:
+            shared_http = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(ssl=False, limit=conc),
+                headers=self.headers,
+            )
+            try:
+                async def _ban_worker(p):
                     for site in sites:
                         banned = await self._ban_check_one(
                             p, site["url"],
                             site.get("success_pattern", ""),
+                            shared_http=shared_http,
                         )
                         if site["name"] == "google":
                             p.google_ban = banned
-                prog.update(tid, advance=1)
+                    prog.update(tid, advance=1)
 
-            await asyncio.gather(*[worker(p) for p in alive])
+                await run_bounded(alive, _ban_worker, conc)
+            finally:
+                await shared_http.close()
 
         gb = sum(1 for p in alive if p.google_ban is True)
         console.print(f"[green]✓[/] Google banned: {gb}/{len(alive)}")
 
     async def _ban_check_one(
-        self, proxy: Proxy, url: str, pattern: str
+        self,
+        proxy: Proxy,
+        url: str,
+        pattern: str,
+        shared_http: Optional[aiohttp.ClientSession] = None,
     ) -> bool:
         timeout = aiohttp.ClientTimeout(total=15)
-        session, kwargs = self._create_proxy_session(proxy, timeout)
+        is_socks = proxy.protocol in (ProxyProtocol.SOCKS4, ProxyProtocol.SOCKS5)
+        if is_socks or shared_http is None:
+            session, kwargs = self._create_proxy_session(proxy, timeout)
+            close_after = True
+        else:
+            session = shared_http
+            kwargs = {"proxy": proxy.url}
+            close_after = False
         if not session:
             return True
         try:
-            async with session.get(url, **kwargs) as r:
+            async with session.get(url, timeout=timeout, **kwargs) as r:
                 if r.status == 200:
                     text = await r.text()
                     return pattern.lower() not in text.lower()
@@ -1869,7 +2279,8 @@ class UPOEngine:
         except Exception:
             return True
         finally:
-            await session.close()
+            if close_after:
+                await session.close()
 
     # ── Fraud Waterfall ───────────────────────────────────────────────────
 
@@ -1889,7 +2300,7 @@ class UPOEngine:
             f"\n[cyan]Fraud waterfall on top {len(target)} "
             f"proxies...[/cyan]"
         )
-        sem = asyncio.Semaphore(30)
+        conc = self._phase_concurrency("fraud", 10)
 
         with Progress(
             SpinnerColumn(), TextColumn("{task.description}"),
@@ -1898,13 +2309,13 @@ class UPOEngine:
             tid = prog.add_task(
                 "[cyan]Fraud check...", total=len(target)
             )
+            # Fraud uses a direct outbound session (not proxied)
             async with aiohttp.ClientSession() as shared:
-                async def worker(p):
-                    async with sem:
-                        await self._waterfall_one(p, shared)
+                async def _fraud_worker(p):
+                    await self._waterfall_one(p, shared)
                     prog.update(tid, advance=1)
 
-                await asyncio.gather(*[worker(p) for p in target])
+                await run_bounded(target, _fraud_worker, conc)
 
         sc = self.stats["api_calls"]
         console.print(
@@ -2023,7 +2434,9 @@ class UPOEngine:
             except Exception:
                 pass
 
+        # Always set fraud_risk_score = composite_score (canonical 0-100 field)
         proxy.composite_score = min(100, max(0, score))
+        proxy.fraud_risk_score = float(proxy.composite_score)
         self._save_fraud_cache(proxy)
 
     def _save_fraud_cache(self, proxy: Proxy):
@@ -2075,15 +2488,23 @@ class UPOEngine:
             # available (anonymity, fingerprint, fraud, DNS leak, etc.)
             if self.config["stealth_score"]["enabled"]:
                 self._calc_stealth(p)
+            # 2E/2F: Always sync fraud_risk_score from composite_score
+            if p.composite_score is not None:
+                if p.fraud_risk_score is None:
+                    p.fraud_risk_score = float(p.composite_score)
+            # Legacy compat: keep fraud_score synced for existing callers
+            if p.fraud_score is None and p.composite_score is not None:
+                p.fraud_score = float(p.composite_score)
 
-            # Save to history
-            if self.history:
-                self.history.update(p)
+        if self.history:
+            self.history.update_many(
+                [proxy for proxy in self.proxies.values() if proxy.alive]
+            )
 
     # ── Export ────────────────────────────────────────────────────────────
 
     def export(self):
-        out = Path(self.config["output"]["dir"])
+        out = resolve_path(self.config["output"]["dir"])
         out.mkdir(exist_ok=True)
         alive = sorted(
             [p for p in self.proxies.values() if p.alive],
@@ -2167,10 +2588,10 @@ class UPOEngine:
         # ── Checked folder: dated export that never overwrites ────
         if self.config.get("checked_output", {}).get("enabled", False):
             checked_dir = Path(
-                self.config["checked_output"].get("dir", "checked")
+                resolve_path(self.config["checked_output"].get("dir", "checked"))
             )
             checked_dir.mkdir(parents=True, exist_ok=True)
-            date_str = datetime.now().strftime("%Y-%m-%d")
+            date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             rand_suffix = f"{random.randint(100, 999)}"
             basename = f"proxies_{date_str}_{rand_suffix}"
 
@@ -2227,7 +2648,7 @@ class UPOEngine:
         }
 
         t = Table(
-            title="🏆 UPO v5-fix3 — Results",
+            title="UPO v5-fix3 — Results",
             show_header=False, border_style="bold blue",
         )
         t.add_column("Metric", style="cyan", width=25)
@@ -2319,7 +2740,7 @@ class UPOEngine:
             dns_c = sum(1 for p in alive if p.dns_leak is False)
             if dns_l or dns_c:
                 t.add_row(
-                    "DNS Leak",
+                    "Egress IP",
                     f"Clean:{dns_c} │ Leaking:{dns_l}",
                 )
 
@@ -2357,8 +2778,7 @@ class UPOEngine:
         console.print(Panel(t, border_style="bold blue"))
         return sd
 
-
-# ==============================================================================
+# ============================================================================
 # SECTION 6: CRAWL4AI
 # ==============================================================================
 
@@ -2370,6 +2790,12 @@ async def run_crawl4ai(config: Dict):
     We solve this by running the entire crawl4ai pipeline in a
     dedicated thread with its own ProactorEventLoop.
     """
+
+
+
+
+
+
     if not config["crawl4ai"]["enabled"]:
         return
 
@@ -2432,6 +2858,93 @@ async def run_crawl4ai(config: Dict):
                 for m in proxy_rx.finditer(result.markdown or "")
             ]
 
+        # ── proxy-daily.com: uses a JS DataTable fed by their JSON API ──
+        # The static HTML only has placeholder "-" cells; we must hit the
+        # real serverside endpoint directly (no browser required).
+        async def scrape_proxy_daily_api() -> List[Dict]:
+            base = "https://proxy-daily.com"
+            headers = {
+                "User-Agent": config["general"]["user_agent"],
+                "Referer": "https://proxy-daily.com/",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+            proxies_out: List[Dict] = []
+            # --- Strategy 1: paginated JSON serverside API ---
+            try:
+                page_size = 100
+                start = 0
+                draw = 1
+                connector = aiohttp.TCPConnector(ssl=False)
+                async with aiohttp.ClientSession(
+                    connector=connector,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as sess:
+                    while True:
+                        url = (
+                            f"{base}/api/serverside/proxies"
+                            f"?draw={draw}&start={start}&length={page_size}"
+                        )
+                        async with sess.get(url) as resp:
+                            if resp.status != 200:
+                                break
+                            data = await resp.json(content_type=None)
+                        rows = data.get("data", [])
+                        if not rows:
+                            break
+                        for row in rows:
+                            ip   = str(row.get("ip", "")).strip()
+                            port = str(row.get("port", "")).strip()
+                            # protocol field can be "Http", "Socks4",
+                            # "Http, Https", "Http, Socks4", etc.
+                            raw_proto = row.get("protocol", "Http")
+                            # Emit one entry per detected protocol
+                            for p in [x.strip() for x in raw_proto.split(",")]:
+                                p_lower = p.lower()
+                                if p_lower in ("http", "https", "socks4", "socks5"):
+                                    proto = p_lower
+                                else:
+                                    proto = "http"
+                                if ip and port:
+                                    proxies_out.append({
+                                        "ip": ip, "port": port,
+                                        "protocol": proto,
+                                        "source": "proxy-daily.com",
+                                    })
+                        total = data.get("recordsTotal", 0)
+                        start += page_size
+                        draw  += 1
+                        if start >= total:
+                            break
+            except Exception as e:
+                console.print(f"  [dim yellow]proxy-daily JSON API warn: {e}[/dim yellow]")
+
+            # --- Strategy 2: plain-text export fallback (all protocols) ---
+            if not proxies_out:
+                try:
+                    connector2 = aiohttp.TCPConnector(ssl=False)
+                    async with aiohttp.ClientSession(
+                        connector=connector2,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as sess:
+                        async with sess.get(
+                            f"{base}/api/export_proxies_ip_port"
+                        ) as resp:
+                            text = await resp.text()
+                        for line in text.splitlines():
+                            m = proxy_rx.search(line)
+                            if m:
+                                proxies_out.append({
+                                    "ip": m.group(1), "port": m.group(2),
+                                    "protocol": "http",
+                                    "source": "proxy-daily.com",
+                                })
+                except Exception as e:
+                    console.print(f"  [dim yellow]proxy-daily export fallback warn: {e}[/dim yellow]")
+
+            return proxies_out
+
         bc = BrowserConfig(
             headless=True, user_agent=config["general"]["user_agent"]
         )
@@ -2449,7 +2962,6 @@ async def run_crawl4ai(config: Dict):
             for name, url in [
                 ("proxynova.com",
                  "https://www.proxynova.com/proxy-server-list/"),
-                ("proxy-daily.com", "https://proxy-daily.com/"),
                 ("advanced.name", "https://advanced.name/freeproxy"),
             ]:
                 try:
@@ -2463,7 +2975,17 @@ async def run_crawl4ai(config: Dict):
                 except Exception as e:
                     console.print(f"  [red]✗[/] {name}: {e}")
 
-        output_path = Path(config["crawl4ai"]["output_file"])
+        # proxy-daily.com: scraped outside the browser context via its API
+        try:
+            scraped = await asyncio.wait_for(scrape_proxy_daily_api(), timeout=90)
+            all_proxies.extend(scraped)
+            console.print(
+                f"  [green]✓[/] proxy-daily.com: {len(scraped)} proxies"
+            )
+        except Exception as e:
+            console.print(f"  [red]✗[/] proxy-daily.com: {e}")
+
+        output_path = resolve_path(config["crawl4ai"]["output_file"])
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
             json.dump(all_proxies, f, indent=2)
@@ -2474,7 +2996,10 @@ async def run_crawl4ai(config: Dict):
 
     # ── Run on a ProactorEventLoop in a separate thread ──
     def _run_in_thread():
-        loop = asyncio.ProactorEventLoop()
+        if sys.platform == "win32":
+            loop = asyncio.ProactorEventLoop()
+        else:
+            loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(_crawl4ai_inner())
@@ -2484,14 +3009,13 @@ async def run_crawl4ai(config: Dict):
     # Run in a thread so the main SelectorEventLoop isn't blocked
     await asyncio.get_event_loop().run_in_executor(None, _run_in_thread)
 
-
-# ==============================================================================
+# ============================================================================
 # SECTION 7: REST API
 # ==============================================================================
 
 def start_api(engine: UPOEngine, host: str, port: int):
     try:
-        from fastapi import FastAPI, Query
+        from fastapi import FastAPI, Header, HTTPException, Query
         import uvicorn
     except ImportError:
         console.print(
@@ -2500,17 +3024,26 @@ def start_api(engine: UPOEngine, host: str, port: int):
         return
 
     app = FastAPI(title="UPO API")
+    api_key = engine.config["api"].get("api_key", "")
+    max_limit = engine.config["api"].get("max_limit", 1000)
+
+    def check_api_key(supplied_key: str):
+        if api_key and supplied_key != api_key:
+            raise HTTPException(status_code=401, detail="Invalid API key")
 
     @app.get("/proxies")
     async def get_proxies(
         protocol: Optional[str] = Query(None),
         country: Optional[str] = Query(None),
         anonymity: Optional[str] = Query(None),
-        min_stealth: Optional[int] = Query(None),
+        min_stealth: Optional[int] = Query(None, ge=0, le=100),
         proxy_type: Optional[str] = Query(None),
-        max_latency: Optional[int] = Query(None),
-        limit: int = Query(20),
+        max_latency: Optional[int] = Query(None, ge=1),
+        limit: int = Query(20, ge=1, le=1000),
+        x_api_key: str = Header(default=""),
     ):
+        check_api_key(x_api_key)
+        limit = min(limit, max_limit)
         r = [p for p in engine.proxies.values() if p.alive]
         if protocol:
             r = [p for p in r if p.protocol.value == protocol]
@@ -2542,7 +3075,9 @@ def start_api(engine: UPOEngine, host: str, port: int):
         protocol: Optional[str] = None,
         country: Optional[str] = None,
         anonymity: Optional[str] = None,
+        x_api_key: str = Header(default=""),
     ):
+        check_api_key(x_api_key)
         r = [p for p in engine.proxies.values() if p.alive]
         if protocol:
             r = [p for p in r if p.protocol.value == protocol]
@@ -2558,7 +3093,8 @@ def start_api(engine: UPOEngine, host: str, port: int):
         return random.choice(r).to_dict()
 
     @app.get("/stats")
-    async def get_stats():
+    async def get_stats(x_api_key: str = Header(default="")):
+        check_api_key(x_api_key)
         alive = [p for p in engine.proxies.values() if p.alive]
         return {
             "total": len(engine.proxies),
@@ -2603,8 +3139,7 @@ def start_api(engine: UPOEngine, host: str, port: int):
     console.print(f"  [dim]GET /random?protocol=http[/dim]")
     console.print(f"  [dim]GET /stats[/dim]")
 
-
-# ==============================================================================
+# ============================================================================
 # SECTION 8: CLI & PIPELINE
 # ==============================================================================
 
@@ -2612,6 +3147,7 @@ def start_api(engine: UPOEngine, host: str, port: int):
 @click.option("--config", "config_path", default="config.yaml")
 @click.option("--scrape-only", is_flag=True)
 @click.option("--no-crawl4ai", is_flag=True)
+@click.option("--crawl4ai", "enable_crawl4ai", is_flag=True)
 @click.option("--no-ban-check", is_flag=True)
 @click.option("--no-speed-test", is_flag=True)
 @click.option("--no-dns-leak", is_flag=True)
@@ -2627,35 +3163,37 @@ def start_api(engine: UPOEngine, host: str, port: int):
 @click.option("--api-port", default=8000, type=int)
 @click.option("--test-limit", default=None, type=int)
 def main(
-    config_path, scrape_only, no_crawl4ai, no_ban_check,
-    no_speed_test, no_dns_leak, no_stealth, no_protocol_detect,
-    enable_fraud, concurrency, timeout, rounds, country,
-    exclude_dc, api, api_port, test_limit,
+    config_path, scrape_only, no_crawl4ai, enable_crawl4ai, no_ban_check,
+    no_speed_test, no_dns_leak, no_stealth, no_protocol_detect, enable_fraud,
+    concurrency, timeout, rounds, country, exclude_dc, api, api_port,
+    test_limit,
 ):
-    """🏆 UPO v5-fix2 — Ultimate Proxy Operator"""
+    """UPO v5-fix3 — Ultimate Proxy Operator"""
     banner = """[bold blue]
- ██╗   ██╗██████╗  ██████╗    ██╗   ██╗███████╗
- ██║   ██║██╔══██╗██╔═══██╗   ██║   ██║██╔════╝
- ██║   ██║██████╔╝██║   ██║   ██║   ██║███████╗
- ██║   ██║██╔═══╝ ██║   ██║   ╚██╗ ██╔╝╚════██║
- ╚██████╔╝██║     ╚██████╔╝    ╚████╔╝ ███████║
-  ╚═════╝ ╚═╝      ╚═════╝      ╚═══╝  ╚══════╝[/bold blue]
-[dim]v5-fix2 — Scrape · Verify · Fingerprint · Score · Serve[/dim]"""
+ ██╗   ██╗██████╗  ██████╗
+ ██║   ██║██╔══██╗██╔═══██╗
+ ██║   ██║██████╔╝██║   ██║
+ ██║   ██║██╔═══╝ ██║   ██║
+ ╚██████╔╝██║     ╚██████╔╝
+  ╚═════╝ ╚═╝      ╚═════╝[/bold blue]
+[dim]v5-fix3 — Scrape · Verify · Fingerprint · Score · Serve[/dim]"""
     console.print(Panel(banner, border_style="bold blue", expand=False))
 
     config = copy.deepcopy(DEFAULT_CONFIG)
-    if os.path.exists(config_path):
+    config_file = resolve_path(config_path)
+    if config_file.exists():
         try:
-            with open(config_path) as f:
-                uc = yaml.safe_load(f)
-            if uc:
-                for k, v in uc.items():
-                    if isinstance(v, dict) and k in config:
-                        config[k].update(v)
-                    else:
-                        config[k] = v
+            with config_file.open("r", encoding="utf-8") as f:
+                user_config = yaml.safe_load(f) or {}
+            config = deep_merge(config, user_config)
         except Exception as e:
             console.print(f"[yellow]⚠ Config error: {e}[/yellow]")
+            raise click.ClickException(str(e))
+    validate_config(config)
+    cpu_cap = max(20, (os.cpu_count() or 2) * 25)
+    config["general"]["concurrency"] = min(
+        config["general"]["concurrency"], cpu_cap
+    )
 
     if concurrency:
         config["general"]["concurrency"] = concurrency
@@ -2663,6 +3201,8 @@ def main(
         config["general"]["timeout_total"] = timeout
     if rounds:
         config["general"]["verification_rounds"] = rounds
+    if enable_crawl4ai:
+        config["crawl4ai"]["enabled"] = True
     if no_crawl4ai:
         config["crawl4ai"]["enabled"] = False
     if no_ban_check:
@@ -2688,7 +3228,6 @@ def main(
         config["api"]["port"] = api_port
 
     asyncio.run(pipeline(config, scrape_only, test_limit))
-
 
 async def pipeline(
     config: Dict, scrape_only: bool, test_limit: Optional[int]
@@ -2735,9 +3274,15 @@ async def pipeline(
     engine.filter_garbage()
 
     if test_limit:
-        engine.proxies = dict(
-            list(engine.proxies.items())[:test_limit]
+        items = list(engine.proxies.values())
+        items.sort(
+            key=lambda p: (
+                p.source != "verified_db",
+                p.latency_ms or 999999,
+            )
         )
+        items = items[:test_limit]
+        engine.proxies = {proxy.id: proxy for proxy in items}
         console.print(
             f"[yellow]⚠ Test limit: {test_limit} proxies[/yellow]"
         )
@@ -2757,7 +3302,7 @@ async def pipeline(
         if config["stealth_score"]["enabled"]:
             phases.append("TCP Fingerprint")
         if config["dns_leak"]["enabled"]:
-            phases.append("DNS Leak")
+            phases.append("Egress IP Check")
         if config["fraud_check"]["enabled"]:
             phases.append(
                 f"Fraud Waterfall (top {config['fraud_check'].get('top_n', 100)})"
@@ -2871,7 +3416,6 @@ async def pipeline(
                 await asyncio.sleep(1)
         except KeyboardInterrupt:
             console.print("\n[yellow]Shutting down...[/yellow]")
-
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,10 @@
+output:
+  dir: "bench/lc/output"
+crawl4ai:
+  enabled: false
+history:
+  db_path: "bench/lc/data/proxy_history.db"
+verified_db:
+  db_path: "bench/lc/data/verified_proxies.db"
+checked_output:
+  dir: "bench/lc/checked"

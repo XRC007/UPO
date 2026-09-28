@@ -1,0 +1,10 @@
+﻿output:
+  dir: "bench/lcfull/output"
+crawl4ai:
+  output_file: "bench/lcfull/output/crawled_proxies.json"
+history:
+  db_path: "bench/lcfull/data/proxy_history.db"
+verified_db:
+  db_path: "bench/lcfull/data/verified_proxies.db"
+checked_output:
+  dir: "bench/lcfull/checked"

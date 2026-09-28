@@ -1,0 +1,10 @@
+﻿output:
+  dir: "bench/old/output"
+crawl4ai:
+  output_file: "bench/old/output/crawled_proxies.json"
+history:
+  db_path: "bench/old/data/proxy_history.db"
+verified_db:
+  db_path: "bench/old/data/verified_proxies.db"
+checked_output:
+  dir: "bench/old/checked"
