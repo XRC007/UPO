@@ -1,4 +1,0 @@
-OK: https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/http.txt -> Found 4737 proxies. Sample: 1.0.205.87:8080
-OK: https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/https.txt -> Found 2260 proxies. Sample: 1.0.171.213:8080
-OK: https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/socks4.txt -> Found 4588 proxies. Sample: 1.0.136.16:4153
-OK: https://cdn.jsdelivr.net/gh/ObcbO/getproxy/file/socks5.txt -> Found 4860 proxies. Sample: 1.12.55.136:2080

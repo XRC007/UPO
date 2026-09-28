@@ -1,5 +1,0 @@
-OK: https://spys.me/proxy.txt -> Found 400 proxies. Sample: 103.175.202.138:8090
-OK: https://spys.me/socks.txt -> Found 400 proxies. Sample: 103.206.68.232:1080
-OK: https://free.redscrape.com/api/proxies?type=http&format=txt -> Found 687 proxies. Sample: 129.150.55.165:1080
-OK: https://free.redscrape.com/api/proxies?type=socks4&format=txt -> Found 687 proxies. Sample: 129.150.55.165:1080
-OK: https://free.redscrape.com/api/proxies?type=socks5&format=txt -> Found 687 proxies. Sample: 129.150.55.165:1080

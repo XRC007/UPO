@@ -1,5 +1,25 @@
-data/*.mmdb
-output/
+# ── interpreter / build ──────────────────────────────────
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
+
+# ── secrets & machine-local ──────────────────────────────
 .env
+
+# ── runtime-generated data (proxy datasets, not source) ──
+output/
+checked/
+data/*.mmdb
+data/*.db
+bench/**/data/
+bench/**/output/
+bench/**/checked/
+*.log
+
+# ── tooling caches ───────────────────────────────────────
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
