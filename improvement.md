@@ -135,7 +135,15 @@ than `npo/` — same layout goals, different name. Current verification:
 serial 3,187.5 s vs lifecycle **1,598.3 s — −49.9% wall time**. Full table,
 mechanism and caveats in `bench/COMPARISON.md`.
 
-Still open: **I8** (partial — root tests consolidated into 3 files, but the
-vanished 68-test `tests/` suite cases and `npo/test/` layout remain),
-**I9** (no `requirements.txt` yet; dasboard.py still misspelled),
-**I10** (git hygiene).
+Still open: **I8 ✅ done** (privacy suite ported as `tests/test_privacy_redaction.py`
+— 7 tests; dead npo specs archived under `tests/archive/` excluded from
+collection; full old-suite→code map in `tests/README.md`, leftover gaps filed
+there as feature requests, not test debt), **I9 ✅ done** (`requirements.txt`
+pinned, `README.md` with one-command setup, `dasboard.py` → `dashboard.py`
+via git mv), **I10 ✅ done** (.gitignore extended; runtime datasets/scratch
+untracked; repo committed as 3 logical commits, tree clean).
+
+Current suite: **381 passed** (200 legacy · 154 coverage · 20 lifecycle ·
+7 privacy). Git: `a8db7ed` hygiene · `6c0b463` package+lifecycle ·
+`57ce1b6` tests+docs.
+

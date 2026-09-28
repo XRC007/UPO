@@ -1,0 +1,33 @@
+# UPO runtime + dev dependencies — pinned to the versions this repo is
+# verified against (Python 3.13.5, 374→381 test green, 2026-09-28).
+#
+# Install:  py -3.13 -m pip install -r requirements.txt
+# then:     py -3.13 -m pip install -e .        (editable, gives `upo` CLI)
+# test:     py -3.13 -m pytest -q
+# run:      py -3.13 main.py --help
+
+# ── core runtime ──────────────────────────────────────────────
+aiohttp==3.13.3
+aiohttp-socks==0.11.0
+click==8.3.1
+geoip2==5.2.0
+maxminddb==3.1.1
+PyYAML==6.0.3
+rich==15.0.0
+
+# ── optional integrations ─────────────────────────────────────
+python-dotenv==1.2.2       # .env API keys (fraud tier)
+fastapi==0.141.1           # `--api` server
+uvicorn==0.51.0
+httpx==0.28.1              # starlette TestClient in coverage suite
+crawl4ai==0.8.6            # --no-crawl4ai skips; needs playwright browsers
+
+# ── dev / test ────────────────────────────────────────────────
+pytest==9.0.2
+pytest-asyncio==1.3.0
+pytest-cov==7.0.0
+pytest-mock==3.15.1
+
+# NOTE: Crawl4AI drags playwright + a chromium install
+# (crawl4ai-setup / playwright install chromium). Skip it in minimal envs —
+# UPO degrades gracefully with --no-crawl4ai.
