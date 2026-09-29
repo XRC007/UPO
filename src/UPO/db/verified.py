@@ -31,6 +31,28 @@ class VerifiedProxyDB:
             country_code TEXT,
             anonymity TEXT,
             proxy_type TEXT)""")
+        # Legacy-schema migration: DBs from earlier UPO/npo eras define
+        # ``verified`` without address/proxy_type, which made every
+        # save_all silently fail (the write error is only console-printed).
+        # This table is wiped and rewritten each run by design, so
+        # recreating it on schema mismatch loses nothing.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(verified)")}
+        if "address" not in cols:
+            console.print(
+                "[yellow]⚠[/] Verified DB: legacy schema — recreating "
+                "(rewritten every run anyway)."
+            )
+            conn.execute("DROP TABLE verified")
+            conn.execute("""CREATE TABLE verified (
+                address TEXT PRIMARY KEY,
+                ip TEXT NOT NULL,
+                port INT NOT NULL,
+                protocol TEXT NOT NULL,
+                last_verified TEXT,
+                latency_ms INT,
+                country_code TEXT,
+                anonymity TEXT,
+                proxy_type TEXT)""")
         conn.commit()
         conn.close()
 

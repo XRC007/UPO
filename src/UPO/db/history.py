@@ -71,8 +71,14 @@ class ProxyHistory:
                      proxy.id),
                 )
             else:
+                # Named columns: production DBs from earlier UPO/npo eras
+                # carry extra columns (username, failed_checks, …) — a
+                # positional VALUES(...) silently fails against them.
                 c.execute(
-                    "INSERT INTO proxies VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    """INSERT INTO proxies (id, ip, port, protocol,
+                       first_seen, last_seen, last_alive, total_checks,
+                       successful_checks, avg_latency, country, asn, isp,
+                       proxy_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (proxy.id, proxy.ip, proxy.port, proxy.protocol.value,
                      proxy.first_seen, now, now if proxy.alive else None,
                      1, 1 if proxy.alive else 0, proxy.latency_ms,

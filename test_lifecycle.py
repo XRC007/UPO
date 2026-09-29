@@ -21,6 +21,7 @@ import pytest
 from UPO import Proxy, ProxyProtocol, UPOEngine, load_config
 from UPO import socks as socks_mod
 from UPO.db.history import ProxyHistory
+from UPO.db.verified import VerifiedProxyDB
 
 from test_upo import temp_dir, config  # noqa: F401  (fixtures)
 
@@ -575,6 +576,94 @@ class TestSocksFraming:
             await r.read(2)
             w.close()
         assert seen["creds"] == ("u1", "p2")
+
+
+# ============================================================================
+# Legacy-schema DB compatibility (real bugs found auditing production DBs:
+# data/verified_proxies.db has an 8-col pre-address schema, and
+# data/proxy_history.db's proxies table has 24 columns — positional INSERTs
+# against either silently failed, swallowing the error into a console line)
+# ============================================================================
+
+class TestLegacySchemaCompat:
+    async def test_history_update_into_wider_legacy_table(self, tmp_path):
+        db = str(tmp_path / "wide.db")
+        conn = sqlite3.connect(db)
+        conn.execute(
+            """CREATE TABLE proxies (
+                id TEXT PRIMARY KEY, ip TEXT, port INT, protocol TEXT,
+                first_seen TEXT, last_seen TEXT, last_alive TEXT,
+                total_checks INT DEFAULT 0, successful_checks INT DEFAULT 0,
+                avg_latency REAL, country TEXT, asn INT, isp TEXT,
+                proxy_type TEXT, username TEXT, anonymity TEXT,
+                https_connect INT, udp_supported INT, failed_checks INT,
+                historical_reliability REAL, latency_sum REAL,
+                latency_count INT, min_latency INT, max_latency INT)""")
+        conn.execute(
+            """CREATE TABLE checks (proxy_id TEXT, checked_at TEXT,
+               alive INT, latency INT, anonymity TEXT,
+               FOREIGN KEY (proxy_id) REFERENCES proxies(id))""")
+        conn.execute(
+            """CREATE TABLE api_cache (ip TEXT PRIMARY KEY, checked_at TEXT,
+               ipinfo TEXT, iphub TEXT, getipintel TEXT, ipqs TEXT,
+               composite_score INT)""")
+        conn.commit()
+        conn.close()
+
+        h = ProxyHistory(db)
+        p = Proxy("5.6.7.8", 8080, ProxyProtocol.SOCKS5)
+        p.alive = True
+        p.latency_ms = 42
+        h.update(p)
+        row = sqlite3.connect(db).execute(
+            "SELECT total_checks, successful_checks FROM proxies WHERE id=?",
+            (p.id,)).fetchone()
+        assert row == (1, 1), "silent write failure vs legacy wide schema"
+
+    async def test_verified_legacy_schema_recreated_and_writable(self, tmp_path):
+        db = str(tmp_path / "old.db")
+        conn = sqlite3.connect(db)
+        conn.execute(
+            """CREATE TABLE verified (
+                id TEXT PRIMARY KEY, ip TEXT, port INT, protocol TEXT,
+                latency_ms INT, anonymity TEXT, country TEXT,
+                supports_https INT DEFAULT 0)""")
+        conn.execute(
+            "INSERT INTO verified VALUES ('a','1.1.1.1',1,'http',1,NULL,0,0)")
+        conn.commit()
+        conn.close()
+
+        v = VerifiedProxyDB(db)          # detects missing address col → recreate
+        p = Proxy("2.2.2.2", 80, ProxyProtocol.HTTP)
+        p.alive = True
+        v.save_all([p])                  # previously: silent write error
+        assert v.count() == 1
+        assert sqlite3.connect(db).execute(
+            "SELECT address FROM verified").fetchall() == [("2.2.2.2:80",)]
+
+    async def test_bulk_update_writes_wide_legacy_table(self, tmp_path):
+        db = str(tmp_path / "wide3.db")
+        conn = sqlite3.connect(db)
+        conn.execute(
+            """CREATE TABLE proxies (
+                id TEXT PRIMARY KEY, ip TEXT, port INT, protocol TEXT,
+                first_seen TEXT, last_seen TEXT, last_alive TEXT,
+                total_checks INT DEFAULT 0, successful_checks INT DEFAULT 0,
+                avg_latency REAL, country TEXT, asn INT, isp TEXT,
+                proxy_type TEXT, username TEXT, anonymity TEXT,
+                https_connect INT, udp_supported INT, failed_checks INT,
+                historical_reliability REAL, latency_sum REAL,
+                latency_count INT, min_latency INT, max_latency INT)""")
+        conn.commit()
+        conn.close()
+
+        h = ProxyHistory(db)
+        p = Proxy("9.9.9.9", 3128, ProxyProtocol.HTTP)
+        assert h.bulk_update([(p, 4)]) == 1
+        row = sqlite3.connect(db).execute(
+            "SELECT total_checks FROM proxies WHERE id=?",
+            (p.id,)).fetchone()
+        assert row == (4,)
 
 
 # ============================================================================
