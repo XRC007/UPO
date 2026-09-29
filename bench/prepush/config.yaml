@@ -1,0 +1,21 @@
+output:
+  dir: "bench/prepush/output"
+crawl4ai:
+  enabled: false
+history:
+  db_path: "bench/prepush/data/proxy_history.db"
+verified_db:
+  db_path: "bench/prepush/data/verified_proxies.db"
+checked_output:
+  dir: "bench/prepush/checked"
+
+general:
+  concurrency: 30
+  verification_rounds: 1
+
+lifecycle:
+  enabled: true
+  max_in_flight: 200
+
+logging:
+  level: "INFO"
