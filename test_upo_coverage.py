@@ -181,7 +181,7 @@ class TestSplitFaithfulness:
                                 seen[key] = p
 
     def test_no_method_lost_vs_monolith(self):
-        mono = REPO_ROOT / "backup_upo_monolith.py"
+        mono = REPO_ROOT / "reference" / "backup_upo_monolith.py"
         if not mono.exists():
             pytest.skip("monolith backup not present")
         tree = ast.parse(mono.read_text(encoding="utf-8"))

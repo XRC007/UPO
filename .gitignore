@@ -16,6 +16,8 @@ data/*.db
 bench/**/data/
 bench/**/output/
 bench/**/checked/
+bench/**/exit.code
+local_archive/
 *.log
 
 # ── tooling caches ───────────────────────────────────────

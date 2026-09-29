@@ -11,16 +11,12 @@ This directory implements improvement **I8** (test-suite consolidation).
   (`user:pass@ip:port`) must never reach the Proxy model, any export
   (JSON/CSV/TXT/checked), or any DB row (history/verified). 7 tests, all
   offline.
-- `archive/` — **dead specs, kept for reference, excluded from collection**
-  (`norecursedirs = ["archive", ...]` in `pyproject.toml`):
-  - `test_npo_package.py` (528 lines) — API spec of the `npo/` package that
-    was never built. The refactor instead shipped as `src/UPO/`; its TEST 1
-    (deep merge) is already honored by `UPO.config.deep_merge` +
-    `TestDeepMerge` in `test_lifecycle.py`.
-  - `test_step2.py` — early lifecycle/dedup sketch; its intended TCP-dedup
-    semantics now live in `UPO.core.lifecycle` and are pinned by
-    `TestLifecycleEngine::test_tcp_cache_dedups_variants`.
-  - `fix_npo.py` — one-off patch scratch for the deleted `NPOv2.py`.
+- ~~`archive/`~~ — dead npo-era specs (`test_npo_package.py`, `test_step2.py`,
+  `fix_npo.py`) were **removed from the repo in the file clean-up**; they are
+  recoverable from git history (`git show HEAD~:tests/archive/...`). Kept a
+  local copy under `local_archive/` (gitignored). Their intent is honored by
+  current tests: deep merge → `TestDeepMerge` in `test_lifecycle.py`;
+  TCP-dedup → `TestLifecycleEngine::test_tcp_cache_dedups_variants`.
 
 ## Why not every vanished test was ported
 

@@ -110,5 +110,7 @@ the package just got luckier. Now fixed properly (`utf-8-sig` + regression
 test), and `bench/old/config.yaml` rewritten BOM-free.
 
 Artifacts: `bench/old/`, `bench/new/` (Round 1), `bench/baseline/` (Round 3
-serial), `bench/lcfull/` (Round 3 lifecycle), `bench/lc/` (capped smoke tests) —
-each with run.log, config.yaml, output/, checked/, data/.
+serial), `bench/lcfull/` (Round 3 lifecycle), `bench/prepush/` (capped live
+smoke) — each holds run.cmd + config.yaml in the repo; run.log, exit.code,
+output/, checked/, data/ are generated locally per run (gitignored). The
+monolith entry point moved to `reference/backup_upo_monolith.py`.

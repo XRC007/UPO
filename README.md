@@ -29,7 +29,7 @@ API keys for the fraud-waterfall tiers go in `.env`
 ## Test
 
 ```bash
-py -3.13 -m pytest -q                   # 381 tests, fully offline
+py -3.13 -m pytest -q                   # 384 tests, fully offline
 ```
 
 Suite map: `test_upo.py` (engine legacy), `test_upo_coverage.py` (split
@@ -47,8 +47,15 @@ Selector policy (then use `--serial`).
 
 - `src/UPO/` — the package (config, models, collectors, checks, core/lifecycle,
   db, export, api, cli, utils)
-- `info.md` — original project brief · `implementation_plan.md` /
-  `improvement.md` — status-tracked plan (I0–I10) · `bench/COMPARISON.md` —
-  benchmark history (serial vs lifecycle)
-- `backup_upo_monolith.py` / `UPObyAstra.py` — historical single-file versions
-- `dashboard.py` — web analytics UI (`py -3.13 dashboard.py` → :8050)
+- `main.py` / `dashboard.py` — entry points (pipeline run; web analytics UI on
+  :8050)
+- `improvement.md` — status-tracked improvement plan (I1–I10, all shipped) ·
+  `bench/COMPARISON.md` — benchmark history (serial vs lifecycle); `bench/*/`
+  hold reproducible run scripts/configs — logs, outputs and DBs are generated
+  locally and gitignored
+- `reference/backup_upo_monolith.py` — the pre-split monolith, kept because
+  `test_no_method_lost_vs_monolith` guards the split stayed faithful
+- `config.yaml` is machine-local (not tracked); the app runs on built-in
+  defaults when it is absent
+- History: the original project brief and npo-era scratch files were dropped in
+  the repo clean-up; `git log` still has them

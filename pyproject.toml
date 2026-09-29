@@ -32,7 +32,5 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["test_upo.py", "test_upo_coverage.py", "test_lifecycle.py", "tests"]
-# tests/archive/ holds dead npo-era specs that cannot import — keep them for
-# reference but never collect (see tests/README.md).
-norecursedirs = ["archive", "*.egg-info", ".*", "build", "dist", "node_modules"]
+norecursedirs = ["*.egg-info", ".*", "build", "dist", "node_modules", "local_archive"]
 asyncio_mode = "auto"
